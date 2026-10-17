@@ -39,6 +39,7 @@ from quellenuebersetzer.runtime.tesseract import Tesseract
 
 PAGE_BATCH = 12  # Seiten je Durchgang (begrenzt den Speicherbedarf bei großen Bänden)
 OVERLAP_BLOCK = 20  # Seiten je Block beim überlappten Lesen und Übersetzen
+PREVIEW_MAX_FAILS = 3  # Vorschau erst nach so vielen Fehlschlägen in Folge abschalten
 STREAM_TEST_PAGES = 20  # ab dieser Seitenzahl wird einmalig gemessen, ob zwei Übersetzungen gleichzeitig lohnen
 
 
@@ -493,7 +494,7 @@ class Job:
 
         typst = self.paths.runtime / "typst" / "typst.exe"
         n_pages = len(ldoc.pages)
-        preview_failed = []
+        preview_failed = []  # Fehlschläge in Folge; nach PREVIEW_MAX_FAILS wird die Vorschau abgeschaltet
         save_lock = threading.Lock()
 
         def save() -> None:
@@ -502,7 +503,7 @@ class Job:
 
         def page_done(page) -> None:
             """Fertig übersetzte Seite sofort als Vorschau anzeigen (blätterbar im Hauptfenster)."""
-            if not typst.exists() or preview_failed:
+            if not typst.exists() or len(preview_failed) >= PREVIEW_MAX_FAILS:
                 return
             try:
                 original, translated = layout_render.render_preview(
@@ -510,10 +511,14 @@ class Job:
             except Exception as exc:  # noqa: BLE001 – Vorschau darf die Verarbeitung nie aufhalten
                 preview_failed.append(exc)
                 self._log_error(exc)
-                self.emit(Event("hinweis", "Die Vorschau der Übersetzung konnte nicht erstellt werden "
-                                           "(Details im Fehlerprotokoll). Die Verarbeitung läuft weiter.",
-                                src.name, index, total))
+                if len(preview_failed) == 1 or len(preview_failed) == PREVIEW_MAX_FAILS:
+                    self.emit(Event("hinweis", f"Die Vorschau von Seite {page.name} konnte nicht erstellt werden "
+                                               "(Details im Fehlerprotokoll). Die Verarbeitung läuft weiter."
+                                    + (" Die Vorschau ist für diese Datei abgeschaltet."
+                                       if len(preview_failed) >= PREVIEW_MAX_FAILS else ""),
+                                    src.name, index, total))
                 return
+            preview_failed.clear()  # nur Fehlschläge in Folge zählen
             self.emit(Event("seite_fertig", page.name, src.name, page.number, n_pages,
                             outputs=[original, translated]))
 

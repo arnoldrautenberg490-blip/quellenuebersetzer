@@ -354,3 +354,20 @@ def test_unread_pages_count_fully_as_remaining():
     unread = LPage(2, 100, 100, 300, "x", [LRegion("d", "absatz", (0, 0, 9, 9), 0, "", ""),
                                            LRegion("e", "abbildung", (0, 0, 9, 9), 1, "", "")])
     assert _region_counts([read, unread]) == (1, 2)
+
+
+def test_stuck_page_does_not_block_preview_of_later_pages():
+    from quellenuebersetzer.pipeline.layout_doc import LayoutDocument, LPage, LRegion
+    from quellenuebersetzer.pipeline.layout_translate import LayoutTranslator
+
+    pages = [LPage(n, 100, 100, 300, "x", [LRegion(f"s{n}", "absatz", (0, 0, 9, 9), 0, "Tekst", "Text")], read=True)
+             for n in (1, 2, 3)]
+    pages[0].regions[0].target_md = ""  # Seite 1 hängt (Bereich noch offen)
+    done = []
+    lt = LayoutTranslator(LayoutDocument("q", "Q", "druck", ".", pages), None, on_page_done=lambda p: done.append(p.number))
+    lt._queued = {id(pages[0].regions[0])}  # noch in Arbeit → hält die folgenden Seiten auf (Reihenfolge)
+    lt.report_finished_pages()
+    assert done == []
+    lt._queued = set()  # nicht mehr in Arbeit, aber leer geblieben → blockiert nichts mehr
+    lt.report_finished_pages()
+    assert done == [1, 2, 3]

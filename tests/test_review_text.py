@@ -3,7 +3,7 @@ from quellenuebersetzer.ui import review_text
 
 MD = (
     "<!-- Seite 1 -->\n\n## PRZYWILEJ\n\n"
-    "Starosta " + markup.mark_reading("grodowy", ["grodowy", "grodawy"], 0.5) + " płacił 2 \* złote "
+    "Starosta " + markup.mark_reading("grodowy", ["grodowy", "grodawy"], 0.5) + " płacił 2 \\* złote "
     + markup.mark_reading("rocznie", ["rocznie"], 0.4) + ".\n"
 )
 

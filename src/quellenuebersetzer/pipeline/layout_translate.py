@@ -151,6 +151,7 @@ class LayoutTranslator:
         self.previous: tuple[str, str] | None = None
         self.cache: dict[tuple[str, str], str] = {}
         self.reported: set[int] = set()
+        self._queued: set[int] = set()  # id() der Bereiche, deren Übersetzung noch aussteht
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ Hilfen
@@ -162,7 +163,9 @@ class LayoutTranslator:
                 if p.number in self.reported:
                     continue
                 todo = [r for r in p.regions if r.translatable and r.source_md.strip()]
-                if p.read and all(r.target_md for r in todo):
+                # Nur Bereiche, die noch in Arbeit sind, halten die Seite (und damit die folgenden) auf –
+                # ein hängender Bereich, der nicht mehr bearbeitet wird, darf die Vorschau nicht blockieren.
+                if p.read and not any(not r.target_md and id(r) in self._queued for r in todo):
                     self.reported.add(p.number)
                     self.on_page_done(p)
                 else:
@@ -203,6 +206,7 @@ class LayoutTranslator:
             previous = self._unit(unit, t, previous, self.cache)
             troubled.append(t.stats.retries + t.stats.fallbacks > before)
             with self._lock:
+                self._queued.difference_update(id(r) for r in unit)
                 done[0] += 1
                 n = done[0]
             if progress:
@@ -223,6 +227,8 @@ class LayoutTranslator:
                                         "Sprachmodells, bitte prüfen).")
         regions = _pending([r for p in pages for r in p.regions])
         units = build_units(regions)
+        with self._lock:
+            self._queued = {id(r) for unit in units for r in unit}
         self.report_finished_pages()
         if not units:
             return

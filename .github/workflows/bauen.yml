@@ -45,7 +45,11 @@ jobs:
       - name: Tests
         env:
           QUE_TEST_ROOT: ${{ runner.temp }}\testroot
-        run: python -m pytest -q
+        shell: cmd
+        run: |
+          python -m pytest -q -p no:cacheprovider
+          echo pytest-Rueckgabe: %ERRORLEVEL%
+          exit /b %ERRORLEVEL%
 
       - name: Programm bauen
         run: python -m PyInstaller --noconfirm --clean --distpath build/dist --workpath build/work packaging/quellenuebersetzer.spec

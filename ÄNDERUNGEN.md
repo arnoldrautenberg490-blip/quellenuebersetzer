@@ -64,6 +64,8 @@ Stand: 17.10.2026 · Version 0.1.0 (in Entwicklung, noch nicht veröffentlicht)
   (schneller Seitenaufbau und beim Fortsetzen erledigte Seiten verzerrten die Hochrechnung).
 
 ## Ausgabe
+- Vorschau übersetzter Seiten: Eine Seite mit einem leer gebliebenen Bereich hält die folgenden nicht mehr auf;
+  ein misslungenes Vorschaubild schaltet die Vorschau erst nach drei Fehlschlägen in Folge ab.
 - Ergebnisse lassen sich auch auf ein anderes Laufwerk speichern (USB-Stick, D:) – vorher brach das Verschieben
   aus dem Arbeitsordner dort ab.
 - Seitengetreu als PDF (Typst) und Word (positionierte Rahmen): Faksimile (Original als Hintergrund,
@@ -281,7 +283,7 @@ Modellbereichs blieben unbemerkt. Teilweise überlappende Bilder/Tabellen und da
   (nur programmeigene, am Installationspfad erkannt).
 
 ## Qualitätssicherung
-- 161 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
+- 162 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
   darunter Ende-zu-Ende-Qualitätsschranken der Layouterkennung an schwierigen Seiten der Testsammlung.
 - Tests mit echten Modellen auf dem Entwicklungsrechner (ohne Grafikkarte): Gemma 4 E2B und 12B.
 - Setup.exe mehrfach installiert, gestartet und rückstandslos deinstalliert.
