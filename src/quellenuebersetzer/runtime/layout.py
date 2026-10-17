@@ -43,6 +43,7 @@ class Region:
     score: float
     order: int
     container: str = ""  # Kasten, in dem der Bereich liegt (eigener Textfluss)
+    style: str = ""  # grobe Gestaltung (Hintergrund, Schriftfarbe) – nur Gleiches wird zusammengelegt
 
     @property
     def is_text(self) -> bool:
@@ -232,25 +233,31 @@ def resolve_overlaps(regions: list[Region]) -> list[Region]:
     return kept_solids + kept_texts
 
 
-def merge_lines(regions: list[Region]) -> list[Region]:
-    """Untereinander liegende Textzeilen derselben Spalte zu einem Absatz zusammenführen."""
+def merge_lines(regions: list[Region], line_px: float | None = None) -> list[Region]:
+    """Untereinander liegende Textzeilen derselben Spalte zu einem Absatz zusammenführen.
+
+    ``line_px``: typische Zeilenhöhe der Seite – dann darf der Abstand höchstens etwa eine Zeile betragen
+    (sonst richtet er sich nach der Bereichshöhe, und weit getrennte Absätze würden vereinigt).
+    """
     out: list[Region] = []
     for r in sorted(regions, key=lambda r: (r.box[1], r.box[0])):
         merged = False
         if r.kind == "absatz":
             for o in out:
-                if o.kind != "absatz" or o.container != r.container:
+                if o.kind != "absatz" or o.container != r.container or o.style != r.style:
                     continue
-                line_h = min(r.box[3] - r.box[1], o.box[3] - o.box[1])
+                line_h = line_px or min(r.box[3] - r.box[1], o.box[3] - o.box[1])
                 gap = r.box[1] - o.box[3]
-                same_column = abs(r.box[0] - o.box[0]) < line_h * 1.5 and min(r.box[2], o.box[2]) > max(r.box[0], o.box[0])
+                # gleiche Spalte = linker UND rechter Rand stimmen überein; breitere oder schmalere Elemente
+                # (spaltenübergreifende Kästen, Überschriften) werden nie mit einer Spalte vereinigt
+                same_column = abs(r.box[0] - o.box[0]) < line_h * 1.5 and abs(r.box[2] - o.box[2]) < line_h * 1.5
                 if same_column and -line_h * 0.3 <= gap <= line_h * 0.6:
                     o.box = (min(o.box[0], r.box[0]), o.box[1], max(o.box[2], r.box[2]), max(o.box[3], r.box[3]))
                     o.order = min(o.order, r.order)
                     merged = True
                     break
         if not merged:
-            out.append(Region(r.kind, r.box, r.score, r.order, r.container))
+            out.append(Region(r.kind, r.box, r.score, r.order, r.container, r.style))
     return out
 
 

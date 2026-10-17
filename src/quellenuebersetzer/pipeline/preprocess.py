@@ -76,6 +76,18 @@ def enhance(gray: np.ndarray) -> np.ndarray:
     return cv2.bilateralFilter(out, 5, 30, 5)
 
 
+def flatten(gray: np.ndarray) -> np.ndarray:
+    """Hintergrund ebnen: Papier samt Tönungen, Schatten und ungleichmäßiger Belichtung herausrechnen.
+
+    Der Hintergrund wird geschätzt, indem die (schmalen, dunklen) Schriftzüge herausgefiltert werden; geteilt
+    durch ihn ist der Grund überall gleich hell. So entstehen an Kanten hinterlegter Zeilen oder Spalten keine
+    Punktreihen, die die Texterkennung stören.
+    """
+    k = max(15, int(21 * gray.shape[1] / 2480)) | 1
+    background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    return cv2.divide(gray, background, scale=255)
+
+
 def binarize(gray: np.ndarray) -> np.ndarray:
     """Adaptive Binarisierung für Tesseract (verträgt fleckiges, vergilbtes Papier)."""
     blur = cv2.GaussianBlur(gray, (3, 3), 0)

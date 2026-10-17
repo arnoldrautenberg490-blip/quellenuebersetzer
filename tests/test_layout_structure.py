@@ -128,7 +128,10 @@ def test_neusatz_draws_boxes_with_fill_and_frame(tmp_path):
 
 
 @pytest.mark.parametrize("name,aged", [("kasten_dunkel", False), ("tabelle_gestrichelt", True),
-                                       ("zweispaltig", True), ("tabelle_linien", False)])
+                                       ("zweispaltig", True), ("tabelle_linien", False),
+                                       ("spaltenuebergreifend", True), ("farbige_bloecke", False),
+                                       ("tabelle_zebra", True), ("tabelle_mehrzeilig", True),
+                                       ("tabelle_spalten", True), ("tabelle_im_kasten", False)])
 def test_quality_gate_on_hard_pages(tmp_path, tess_root, name, aged):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
     from layout_messen import measure_page
@@ -151,8 +154,131 @@ def test_quality_gate_on_hard_pages(tmp_path, tess_root, name, aged):
     m = measure_page(page, lp, 0.0)
     assert m["bloecke"][0] == m["bloecke"][1]
     assert m["mischung"] == 0 and m["artefakte"] == 0 and m["erfunden"] == 0 and m["ueberlappung"] == 0
+    assert m["ueberlappung_aufbau"] == 0  # jeder Bereich eigenständig, auch nach dem Sicherheitsnetz
     assert m["woerter"][0] >= 0.98 * m["woerter"][1]
     if m["tabellen"][2]:
         assert m["tabellen"][1] == m["tabellen"][2] and m["zellen"][0] >= 0.95 * m["zellen"][1]
     if m["gestaltung"][1]:
         assert m["gestaltung"][0] >= 0.9 * m["gestaltung"][1]
+
+
+def test_wider_or_narrower_blocks_are_never_merged_with_a_column():
+    from quellenuebersetzer.runtime.layout import Region, merge_lines
+
+    def column():
+        return Region("absatz", (100, 100, 1000, 500), 0.9, 0)
+
+    wide_below = Region("absatz", (100, 520, 2000, 800), 0.9, 1)  # spaltenübergreifend, links bündig
+    narrow_below = Region("absatz", (100, 520, 600, 800), 0.9, 1)
+    same_below = Region("absatz", (102, 520, 998, 800), 0.9, 1)
+    far_below = Region("absatz", (100, 700, 1000, 900), 0.9, 1)  # Absatzabstand größer als eine Zeile
+    assert len(merge_lines([column(), wide_below], line_px=40)) == 2
+    assert len(merge_lines([column(), narrow_below], line_px=40)) == 2
+    assert len(merge_lines([column(), same_below], line_px=40)) == 1
+    assert len(merge_lines([column(), far_below], line_px=40)) == 2
+
+
+def test_model_box_spanning_heading_and_columns_is_split():
+    """Ein Rechteck aus Spalten, breitem Farbkasten, Überschrift und wieder Spalten wird an jedem
+    Strukturwechsel geteilt – kein Teil enthält zwei Blöcke."""
+    from quellenuebersetzer.pipeline.structure import split_structure
+
+    page = sammlung.build("spaltenuebergreifend")
+    color = _bgr(page)
+    feats = features.analyse(color)
+    ink = features.text_ink(cv2.cvtColor(color, cv2.COLOR_BGR2GRAY), feats)
+    parts = split_structure((240, 240, 2240, 1900), ink, color, 1.0)
+    flows = ("spalte1a", "spalte2a", "kasten1", "zwischen", "spalte1b", "spalte2b")
+    truth = {b.flow: b.box for b in page.blocks if b.flow in flows and b.kind != "kasten"}
+
+    def inside(p, b):
+        return p[0] <= (b[0] + b[2]) / 2 <= p[2] and p[1] <= (b[1] + b[3]) / 2 <= p[3]
+
+    for flow, box in truth.items():
+        hits = [p for p in parts if inside(p, box)]
+        assert len(hits) == 1, flow
+        assert [f for f, b in truth.items() if inside(hits[0], b)] == [flow]
+
+
+@pytest.mark.parametrize("name", list(sammlung.PAGE_TYPES))
+def test_layout_regions_never_overlap(tmp_path, tess_root, name):
+    from quellenuebersetzer.config import Paths
+    from quellenuebersetzer.pipeline.document import PageImage
+    from quellenuebersetzer.pipeline.layout_reading import LayoutReader
+    from quellenuebersetzer.profile import SourceKind
+    from quellenuebersetzer.runtime.layout import LayoutDetector
+
+    det = LayoutDetector(Paths(tess_root))
+    if not det.available:
+        pytest.skip("Seitenaufbau-Modell nicht in der Testumgebung")
+    page = sammlung.build(name, aged=True)
+    cv2.imencode(".png", _bgr(page))[1].tofile(str(tmp_path / "hintergrund-0001.png"))
+    reader = LayoutReader(SourceKind.DRUCK, None, ["pol"], None, None, detector=det, workdir=tmp_path)
+    lp = reader.detect_page(PageImage(1, tmp_path / "hintergrund-0001.png"))
+    boxes = [r.box for r in lp.regions]
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            assert min(a[2], b[2]) <= max(a[0], b[0]) or min(a[3], b[3]) <= max(a[1], b[1]), (a, b)
+
+
+def test_zebra_bands_give_row_boundaries_but_text_does_not():
+    from quellenuebersetzer.pipeline.preprocess import binarize, enhance
+    from quellenuebersetzer.pipeline.tables import shading_cuts
+
+    for aged in (False, True):
+        page = sammlung.build("tabelle_zebra", aged)
+        t = next(b for b in page.blocks if b.kind == "tabelle")
+        x0, y0, x1, y1 = t.box
+        sub = _bgr(page)[y0:y1, x0:x1]
+        ink = binarize(enhance(cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY))) < 128
+        cuts = [y0 + c for c in shading_cuts(sub, ink, 0, 40)]
+        expected = [y0 + 78 * i for i in range(1, t.table["rows"])]
+        assert len(cuts) == len(expected) and all(abs(a - b) <= 4 for a, b in zip(cuts, expected))
+    # Fließtext ohne Hinterlegung: keine Bänder
+    page = sammlung.build("zweispaltig")
+    b = next(b for b in page.blocks if b.flow == "spalte1")
+    sub = _bgr(page)[b.box[1]:b.box[3], b.box[0]:b.box[2]]
+    ink = binarize(enhance(cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY))) < 128
+    assert shading_cuts(sub, ink, 0, 40) == []
+
+
+def test_multiline_cell_stays_one_row_but_uniform_band_is_split():
+    from quellenuebersetzer.pipeline.tables import split_rows_in_band
+    from quellenuebersetzer.runtime.tesseract import Word
+
+    def w(x, y):
+        return Word("x", 95, (x, y, x + 50, y + 30))
+
+    # Band 0–200, Spalten an 0|300|600: links zwei Zeilen (umbrochene Zelle), rechts eine → eine Tabellenzeile
+    assert split_rows_in_band([w(10, 20), w(10, 60), w(320, 20)], 0, 200, [0, 300, 600], 30) == []
+    # alle Spalten zwei Zeilen auf gleicher Höhe → zwei Tabellenzeilen in einem Farbband
+    cuts = split_rows_in_band([w(10, 20), w(10, 80), w(320, 21), w(320, 79)], 0, 200, [0, 300, 600], 30)
+    assert len(cuts) == 1 and 40 < cuts[0] < 100
+
+
+def test_shading_inside_a_table_is_not_a_box_and_a_cut_off_column_is_added():
+    from quellenuebersetzer.pipeline.features import Panel
+    from quellenuebersetzer.pipeline.structure import _reconcile_tables
+    from quellenuebersetzer.runtime.layout import Region
+
+    table = Region("tabelle", (250, 520, 1850, 1140), 0.9, 0)
+    stripe = Panel((260, 600, 1840, 680), "#e8ecf4")  # Zebrazeile in der Tabelle
+    cut_column = Panel((1768, 520, 2144, 1144), "#ebe1ca")  # vom Modell abgeschnittene hinterlegte Spalte
+    real_box = Panel((250, 1300, 2230, 1700), "#eee4f2")  # Kasten unterhalb
+    regions = [table]
+    boxes = {"k1": stripe, "k2": cut_column, "k3": real_box}
+    _reconcile_tables(regions, boxes, 3508)
+    assert list(boxes) == ["k3"]
+    assert table.box[2] == 2144
+
+
+def test_model_table_covering_a_whole_box_yields_to_the_inner_table():
+    from quellenuebersetzer.pipeline.features import Panel
+    from quellenuebersetzer.pipeline.structure import _reconcile_tables
+    from quellenuebersetzer.runtime.layout import Region
+
+    whole = Region("tabelle", (255, 688, 2219, 1478), 0.48, 0)
+    inner = Region("tabelle", (262, 904, 1539, 1373), 0.51, 1)
+    regions = [whole, inner]
+    _reconcile_tables(regions, {"k1": Panel((260, 648, 2232, 1501), "#ead9b3", "#ae9972", "solid", 6)}, 3508)
+    assert regions == [inner]

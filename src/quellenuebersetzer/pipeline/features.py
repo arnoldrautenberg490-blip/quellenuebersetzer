@@ -218,13 +218,14 @@ def _fill_edges(color: np.ndarray, factor: int) -> tuple[list, list]:
     for ch in range(3):
         grad_y = np.maximum(grad_y, np.abs(cv2.Sobel(lab[..., ch], cv2.CV_32F, 0, 1, ksize=3)))
         grad_x = np.maximum(grad_x, np.abs(cv2.Sobel(lab[..., ch], cv2.CV_32F, 1, 0, ksize=3)))
-    min_len = max(20, smooth.shape[1] // 10)
+    min_len_h = max(20, smooth.shape[1] // 10)
+    min_len_v = max(12, int(110 * smooth.shape[1] / 2480 * 0.7))  # so kurz wie der niedrigste Kasten
     out = []
     for grad, orient in ((grad_y, "h"), (grad_x, "v")):
-        edge = (grad > 14).astype(np.uint8) * 255
-        k = (min_len, 1) if orient == "h" else (1, min_len)
+        edge = (grad > 8).astype(np.uint8) * 255  # auch blasse, gealterte Tönungen
+        k = (min_len_h, 1) if orient == "h" else (1, min_len_v)
         edge = cv2.morphologyEx(edge, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT,
-                                                                               (5, 1) if orient == "h" else (1, 5)))
+                                                                               (15, 1) if orient == "h" else (1, 15)))  # Unterbrechungen durch nahe Schrift
         edge = cv2.morphologyEx(edge, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, k))
         n, _l, stats, _ = cv2.connectedComponentsWithStats(edge, connectivity=8)
         segs = []
@@ -236,6 +237,24 @@ def _fill_edges(color: np.ndarray, factor: int) -> tuple[list, list]:
                 segs.append((int((x + bw / 2) * factor), int(y * factor), int((y + bh) * factor)))
         out.append(segs)
     return out[0], out[1]
+
+
+def _surrounding_lab(color: np.ndarray, box, tol: int, fallback: np.ndarray) -> np.ndarray:
+    """Papierfarbe direkt um eine Fläche (schriftfreie Pixel eines Rings) – unempfindlich gegen ungleichmäßige
+    Belichtung und Vergilbung, die die Seite stellenweise dunkler machen."""
+    h, w = color.shape[:2]
+    x0, y0, x1, y1 = box
+    ring = max(20, tol * 3)
+    ox0, oy0, ox1, oy1 = max(0, x0 - ring), max(0, y0 - ring), min(w, x1 + ring), min(h, y1 + ring)
+    outer = color[oy0:oy1, ox0:ox1]
+    mask = np.ones(outer.shape[:2], bool)
+    mask[max(0, y0 - tol - oy0):max(0, y1 + tol - oy0), max(0, x0 - tol - ox0):max(0, x1 + tol - ox0)] = False
+    mask &= ink_mask(cv2.cvtColor(outer, cv2.COLOR_BGR2GRAY)) == 0
+    px = outer[mask]
+    if px.size < 300:
+        return fallback
+    med = np.median(px.reshape(-1, 3)[:: max(1, len(px) // 20000)], axis=0)
+    return _lab(med.reshape(1, 1, 3).astype(np.uint8))[0, 0]
 
 
 def detect_panels(color: np.ndarray, rules: list[Rule], paper_lab: np.ndarray) -> list[Panel]:
@@ -256,7 +275,14 @@ def detect_panels(color: np.ndarray, rules: list[Rule], paper_lab: np.ndarray) -
         smooth = cv2.medianBlur(cv2.resize(inner, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA), 7)
         bg = np.median(smooth.reshape(-1, 3), axis=0)
         bg_lab = _lab(bg.reshape(1, 1, 3).astype(np.uint8))[0, 0]
-        diff = float(np.linalg.norm(bg_lab - paper_lab))
+        if bg_lab[0] * 100 / 255 >= 45:
+            # heller Grund: Farbe nur aus Pixeln ohne Schrift – über einem dichten Textblock ist das Papier,
+            # so entsteht dort kein Scheinkasten
+            free = inner[ink_mask(cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY)) == 0]
+            if free.size:
+                bg = np.median(free.reshape(-1, 3)[:: max(1, len(free) // 20000)], axis=0)
+                bg_lab = _lab(bg.reshape(1, 1, 3).astype(np.uint8))[0, 0]
+        diff = float(np.linalg.norm(bg_lab - _surrounding_lab(color, (x0, y0, x1, y1), tol, paper_lab)))
         # Rahmen: Linien auf (fast) allen vier Seiten
         frame = [r for r in rules if (r.orient == "h" and min(abs(r.pos - y0), abs(r.pos - y1)) <= tol
                                       and r.x0 <= x0 + tol * 3 and r.x1 >= x1 - tol * 3)

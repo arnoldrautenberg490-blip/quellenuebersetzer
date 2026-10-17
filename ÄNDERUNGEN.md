@@ -171,6 +171,41 @@ Tabellenzeile galt immer als Kopf, Randtext wurde nach Lage zur „Randnotiz“,
   Auf dem Entwicklungsrechner ohne Grafikkarte: kein Gewinn (17,8 s gegen 16,1 s) → bleibt aus.
 - Zeitprotokoll nennt jetzt Kerne, Überlappung und Zahl gleichzeitiger Übersetzungen.
 
+## Tabellen: Hinterlegungen, mehrzeilige Zellen, Tabellen in Kästen (17.10.2026)
+Ist-Stand an vier neuen Testseiten (je sauber und gealtert): Mehrzeilige Zellen wurden zu mehreren
+Tabellenzeilen (0 % richtig), Zebrastreifen und hinterlegte Spalten galten als „Kästen“, eine Tabelle in
+einem Kasten wurde auf der gealterten Seite zu Fließtext.
+
+- **Zeilen aus Farbbändern oder waagrechten Linien:** Bei Tabellen ohne senkrechte Linien bestimmen
+  Zebrazeilen oder Zeilenlinien die Tabellenzeilen – eine umbrochene Zelle bleibt eine Zelle. Ein Band wird
+  nur geteilt, wenn alle Spalten gleich viele Textzeilen auf gleicher Höhe haben.
+- **Spalten aus hinterlegten Spalten oder Wortlücken;** eine Grenze gilt nur, wenn kein Wort sie überquert.
+- **Hinterlegungen in einer Tabelle sind keine Kästen;** eine vom Modell abgeschnittene hinterlegte Spalte wird
+  der Tabelle zugeschlagen; meldet das Modell einen ganzen Kasten als Tabelle, gilt die kleinere Tabelle darin.
+- **Hintergrund-Ebnung vor der Texterkennung:** Papier, Tönungen und Schatten werden herausgerechnet (11 ms je
+  Seite); an Kanten hinterlegter Zeilen entsteht kein „Schmutz“ mehr, der Kopfzeilen verschluckte.
+- Ergebnis an allen 28 Testseiten: Tabellenraster 16/16 richtig (vorher 13/16), Tabellenzellen 99,7 %,
+  keine Verschlechterung an anderer Stelle.
+
+## Praxistest: überlappende und verschmolzene Blöcke (17.10.2026)
+Ursachen: Beim Zusammenlegen genügte ein gleicher *linker* Rand – ein spaltenübergreifender Block wurde mit
+Spalte 1 vereinigt, das breite Rechteck dann mit allem darunter (Kettenreaktion bis zur ganzen Seite).
+Geteilt wurde nur an durchgehenden senkrechten Lücken; Wechsel von Breite oder Farbe innerhalb eines
+Modellbereichs blieben unbemerkt. Teilweise überlappende Bilder/Tabellen und das Sicherheitsnetz konnten
+Überlappungen hinterlassen. Blass getönte Flächen ohne Rahmen wurden nicht als Kasten erkannt.
+
+- **Jedes Textelement gehört zu genau einem Block:** feste Prüfung am Ende von Phase 1 und nach dem
+  Sicherheitsnetz in Phase 2 (dort notfalls zeilenweise, an bestehenden Bereichen beschnitten).
+- **Breitere oder schmalere Elemente bleiben eigene Blöcke:** Zusammenlegen nur bei gleichem linkem *und*
+  rechtem Rand, gleicher Gestaltung und Abstand höchstens etwa einer Zeile. Jeder Textbereich wird zeilenweise
+  geprüft und bei einem Wechsel von Breite, Spaltenaufteilung, Hintergrund- oder Schriftfarbe geteilt.
+- **Farbige Blöcke:** blasse Tönungen werden erkannt; die Kastenfarbe wird nur aus schriftfreien Pixeln bestimmt
+  und mit dem Papier direkt daneben verglichen (keine Scheinkästen durch Vergilbung oder Schatten).
+- Testsammlung um zwei Seitentypen erweitert (spaltenübergreifende Kästen/Überschriften, farbige Blöcke);
+  neue Kennzahl „Überlappungen im Aufbau“. Ergebnis an allen 24 Seiten: Blöcke 99,3 %, Reihenfolge 100 %,
+  0 Vermischungen, 0 Überlappungen. Offen: ein sehr blasses Band auf einer gealterten Seite wird nicht als
+  Kasten erkannt (sein Text bleibt trotzdem ein eigener Block, nur der Hintergrund fehlt im Neusatz).
+
 ## Fehlerbehebung: Speicher nach dem Beenden der Modell-Laufzeit (17.10.2026)
 - Beim Beenden blieben die Modellprozesse (`llama-server`) als Waisen zurück und belegten mehrere Gigabyte
   Arbeitsspeicher – nach einigen Läufen konnte der Speicher volllaufen (Verlangsamung, Abbrüche).
@@ -178,7 +213,7 @@ Tabellenzeile galt immer als Kopf, Randtext wurde nach Lage zur „Randnotiz“,
   (nur programmeigene, am Installationspfad erkannt).
 
 ## Qualitätssicherung
-- 99 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
+- 127 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
   darunter Ende-zu-Ende-Qualitätsschranken der Layouterkennung an schwierigen Seiten der Testsammlung.
 - Tests mit echten Modellen auf dem Entwicklungsrechner (ohne Grafikkarte): Gemma 4 E2B und 12B.
 - Setup.exe mehrfach installiert, gestartet und rückstandslos deinstalliert.

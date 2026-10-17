@@ -251,6 +251,12 @@ def measure_page(page: sammlung.Page, lpage, seconds: float) -> dict:
         if min(ba[2], bb[2]) - max(ba[0], bb[0]) > 0 and min(ba[3], bb[3]) - max(ba[1], bb[1]) > 0:
             ov += 1
     res["ueberlappung"] = ov
+    # Überlappungen schon im erkannten Seitenaufbau (vor dem Einpassen): jeder Bereich muss eigenständig sein
+    raw = 0
+    for a, b in combinations(regions, 2):
+        if min(a.box[2], b.box[2]) - max(a.box[0], b.box[0]) > 0 and min(a.box[3], b.box[3]) - max(a.box[1], b.box[1]) > 0:
+            raw += 1
+    res["ueberlappung_aufbau"] = raw
     res["bereiche"] = [{"art": r.kind, "box": list(r.box)} for r in regions]
     return res
 
@@ -283,7 +289,8 @@ def summarize(results: list[dict]) -> dict:
         "Tabellenzellen richtig": pct(tot("zellen", 1)),
         "Gestaltung getroffen": pct(tot("gestaltung", 1)),
         "Reihenfolge richtig": pct(tot("reihenfolge", 1)),
-        "Überlappungen": tot("ueberlappung"),
+        "Überlappungen (Satz)": tot("ueberlappung"),
+        "Überlappungen (Aufbau)": tot("ueberlappung_aufbau"),
         "Sekunden je Seite": round(sum(r["sekunden"] for r in results) / max(1, len(results)), 1),
     }
 
@@ -331,7 +338,7 @@ def main() -> None:
             print(f"{res['seite']:<26} Blöcke {pct(res['bloecke'])}  Misch {res['mischung']}  "
                   f"Wörter {pct(res['woerter'])}  Art. {res['artefakte']:>3}  Erf. {res['erfunden']}  "
                   f"Tab {res['tabellen'][1]}/{res['tabellen'][2]}  Zellen {pct(res['zellen'])}  "
-                  f"Gest {pct(res['gestaltung'])}  Reihenf {pct(res['reihenfolge'])}  Überl {res['ueberlappung']}  "
+                  f"Gest {pct(res['gestaltung'])}  Reihenf {pct(res['reihenfolge'])}  Überl {res['ueberlappung']}/{res['ueberlappung_aufbau']}  "
                   f"{res['sekunden']} s", flush=True)
     summary = summarize(results)
     print("\nGesamt:")

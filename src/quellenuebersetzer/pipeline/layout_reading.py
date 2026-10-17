@@ -34,7 +34,7 @@ from quellenuebersetzer.pipeline.markup import mark_illegible, mark_reading
 from quellenuebersetzer.pipeline.markup import strip_marks as markup_plain
 from quellenuebersetzer.pipeline.markup import unescape_md
 from quellenuebersetzer.pipeline.pagegeom import fit_to, normalize_geometry
-from quellenuebersetzer.pipeline.preprocess import binarize, crop, enhance, save_png
+from quellenuebersetzer.pipeline.preprocess import binarize, crop, enhance, flatten, save_png
 from quellenuebersetzer.pipeline.reading import Item, PageReader, PageWork, _char_width, segment_lines
 from quellenuebersetzer.pipeline.tables import Table, table_from_rules, table_from_words
 from quellenuebersetzer.pipeline.typography import bold_flags, stroke_ratio
@@ -82,6 +82,26 @@ def clean_line(line: Line) -> Line | None:
     bbox = (min(w.bbox[0] for w in words), min(w.bbox[1] for w in words),
             max(w.bbox[2] for w in words), max(w.bbox[3] for w in words))
     return Line(words, bbox, line.block, line.par)
+
+
+def _bbox_of(lines: list[Line]) -> tuple[int, int, int, int]:
+    return (min(l.bbox[0] for l in lines), min(l.bbox[1] for l in lines), max(l.bbox[2] for l in lines),
+            max(l.bbox[3] for l in lines))
+
+
+def _overlaps(a, b) -> bool:
+    return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
+
+
+def _trim_box(box, obstacle):
+    """Rahmen an einem bestehenden Bereich beschneiden; None, wenn er (fast) ganz darin liegt."""
+    from quellenuebersetzer.runtime.layout import _trim
+
+    ix = max(0, min(box[2], obstacle[2]) - max(box[0], obstacle[0]))
+    iy = max(0, min(box[3], obstacle[3]) - max(box[1], obstacle[1]))
+    if ix * iy > 0.6 * max(1, (box[2] - box[0]) * (box[3] - box[1])):
+        return None
+    return _trim(box, obstacle)
 
 
 def _reading_order_words(words: list[Word]) -> list[Word]:
@@ -205,7 +225,7 @@ class LayoutReader(PageReader):
         feats = feat_mod.analyse(color)
         raw = self.detector.detect_raw(cv2.cvtColor(color, cv2.COLOR_BGR2RGB))
         # Stufe B: Entscheidung aus allen Signalen
-        regions, decorations = structure.build(raw, feats, feat_mod.text_ink(gray, feats))
+        regions, decorations = structure.build(raw, feats, feat_mod.text_ink(gray, feats), color)
         lpage.decorations = decorations
         for i, reg in enumerate(regions):
             rid = f"s{page.number}b{i + 1}"
@@ -227,7 +247,7 @@ class LayoutReader(PageReader):
         work.color = color
         feats = feat_mod.analyse(color)
         work.feats = feats
-        enhanced = enhance(gray)
+        enhanced = enhance(flatten(gray))
         # hinterlegte Kästen: in dunkle Schrift auf hellem Grund umrechnen (je Kasten, nicht seitenweit)
         for d in lpage.decorations:
             if not d.get("fill"):
@@ -262,9 +282,21 @@ class LayoutReader(PageReader):
                     if ln and len(re.sub(r"\W", "", ln.text)) > 1 and _mean_conf([ln]) >= 40:
                         groups.setdefault((ln.block, ln.par), []).append(ln)
                 caught = 0
+                pieces: list[list[Line]] = []
                 for g in groups.values():
-                    bx = (min(l.bbox[0] for l in g), min(l.bbox[1] for l in g), max(l.bbox[2] for l in g),
-                          max(l.bbox[3] for l in g))
+                    # ein aufgefangener Bereich darf keinen bestehenden überlappen: notfalls zeilenweise
+                    bx = _bbox_of(g)
+                    if any(_overlaps(bx, r.box) for r in lpage.regions):
+                        pieces.extend([l] for l in g)
+                    else:
+                        pieces.append(g)
+                for g in pieces:
+                    bx = _bbox_of(g)
+                    for r in lpage.regions:
+                        if bx and _overlaps(bx, r.box):
+                            bx = _trim_box(bx, r.box)
+                    if bx is None:
+                        continue  # liegt in einem erkannten Bereich – dessen Lesung enthält den Text
                     center = ((bx[0] + bx[2]) / 2, (bx[1] + bx[3]) / 2)
                     container = next((d["id"] for d in lpage.decorations
                                       if d["box"][0] <= center[0] <= d["box"][2]
@@ -348,44 +380,21 @@ class LayoutReader(PageReader):
         if t:
             # die ganze Tabelle in EINEM Aufruf lesen (Linien sind schon entfernt) und die Wörter nach ihrer
             # Lage den Zellen zuordnen – statt eines Programmstarts je Zelle
-            table_words = []
-            if self.tesseract:
-                table_lines = self._ocr_region(lr.box, binary, enhanced, 6, mask)
-                table_words = [wd for ln in table_lines for wd in ln.words]
-            by_cell: dict[int, list[Word]] = {}
-            for wd in table_words:
-                cx, cy = (wd.bbox[0] + wd.bbox[2]) / 2, (wd.bbox[1] + wd.bbox[3]) / 2
-                k = next((k for k, c in enumerate(t.cells)
-                          if c.bbox[0] <= cx < c.bbox[2] and c.bbox[1] <= cy < c.bbox[3]), None)
-                if k is not None:
-                    by_cell.setdefault(k, []).append(wd)
-            cells_items = []
-            for k, cell in enumerate(t.cells):
-                inner = (cell.bbox[0] + 4, cell.bbox[1] + 4, cell.bbox[2] - 4, cell.bbox[3] - 4)
-                if inner[2] <= inner[0] or inner[3] <= inner[1]:
-                    continue
-                c_bin = crop(binary, inner, pad=0)
-                if c_bin.size == 0 or (c_bin < 128).mean() < 0.003:
-                    continue
-                words = by_cell.get(k)
-                if words:
-                    words = _reading_order_words(words)
-                elif self.tesseract:
-                    # Schrift in der Zelle, aber kein Wort zugeordnet → Zelle einzeln nachlesen (Vollständigkeit)
-                    single = (inner[3] - inner[1]) < max(60, 2.2 * self._line_h(c_bin))
-                    lines = self._ocr_region(inner, binary, enhanced, 7 if single else 6, mask)
-                    words = [wd for ln in lines for wd in ln.words]
-                line = Line(words, inner, 0, 0) if words else None
-                need = line is None or self.strict or line.min_conf < fusion.CONF_SECOND or (
-                    any(ch.isdigit() for ch in line.text) and line.min_conf < fusion.CONF_OK)
-                cells_items.append(Item(crop(enhanced, inner, pad=0), line=line, need_second=need, bbox=inner,
-                                        cell=cell))
-                lr.erase_boxes.append(inner)
-            work.region_tables[lr.id] = (t, cells_items)
+            table_lines = self._ocr_region(lr.box, binary, enhanced, 6, mask) if self.tesseract else []
+            self._fill_cells(work, lr, t, [wd for ln in table_lines for wd in ln.words], enhanced, binary, mask)
         else:
-            # Tabelle ohne (senkrechte) Linien: aus Tesseract-Wortpositionen aufbauen – nichts wird „erfunden“
+            # Tabelle ohne (senkrechte) Linien: Zeilen aus waagrechten Linien oder Farbbändern, Spalten aus
+            # hinterlegten Spalten oder Wortlücken – so bleibt eine mehrzeilige Zelle eine Zelle
             lines = self._ocr_region(lr.box, binary, enhanced, 6, mask) if self.tesseract else []
-            built = table_from_words(lines)
+            banded = self._grid_from_bands(work, lr.box, rules, lines, scale)
+            if banded is not None:
+                t = banded
+                self._fill_cells(work, lr, t, [wd for ln in lines for wd in ln.words], enhanced, binary, mask)
+                lr.conf = _mean_conf(lines)
+                built = None
+            else:
+                built = table_from_words(lines)
+        if t is None:
             if built is None:
                 # keine Tabellenstruktur erkennbar → als normaler Text lesen (statt Inhalte zu raten)
                 lr.kind = "absatz"
@@ -414,6 +423,104 @@ class LayoutReader(PageReader):
             for c in t.cells:
                 c.header = c.row == 0
         lr.line_px = 0.0
+
+    def _fill_cells(self, work: LayoutWork, lr: LRegion, t: Table, table_words: list[Word], enhanced, binary,
+                    mask) -> None:
+        """Wörter der in einem Aufruf gelesenen Tabelle nach ihrer Lage den Zellen zuordnen."""
+        by_cell: dict[int, list[Word]] = {}
+        for wd in table_words:
+            cx, cy = (wd.bbox[0] + wd.bbox[2]) / 2, (wd.bbox[1] + wd.bbox[3]) / 2
+            k = next((k for k, c in enumerate(t.cells)
+                      if c.bbox[0] <= cx < c.bbox[2] and c.bbox[1] <= cy < c.bbox[3]), None)
+            if k is not None:
+                by_cell.setdefault(k, []).append(wd)
+        cells_items = []
+        for k, cell in enumerate(t.cells):
+            inner = (cell.bbox[0] + 4, cell.bbox[1] + 4, cell.bbox[2] - 4, cell.bbox[3] - 4)
+            if inner[2] <= inner[0] or inner[3] <= inner[1]:
+                continue
+            c_bin = crop(binary, inner, pad=0)
+            if c_bin.size == 0 or (c_bin < 128).mean() < 0.003:
+                continue
+            words = by_cell.get(k)
+            if words:
+                words = _reading_order_words(words)
+            elif self.tesseract:
+                # Schrift in der Zelle, aber kein Wort zugeordnet → Zelle einzeln nachlesen (Vollständigkeit)
+                single = (inner[3] - inner[1]) < max(60, 2.2 * self._line_h(c_bin))
+                lines = self._ocr_region(inner, binary, enhanced, 7 if single else 6, mask)
+                words = [wd for ln in lines for wd in ln.words]
+            line = Line(words, inner, 0, 0) if words else None
+            need = line is None or self.strict or line.min_conf < fusion.CONF_SECOND or (
+                any(ch.isdigit() for ch in line.text) and line.min_conf < fusion.CONF_OK)
+            cells_items.append(Item(crop(enhanced, inner, pad=0), line=line, need_second=need, bbox=inner,
+                                    cell=cell))
+            lr.erase_boxes.append(inner)
+        work.region_tables[lr.id] = (t, cells_items)
+
+    def _grid_from_bands(self, work: LayoutWork, box, rules, lines: list[Line], scale: float) -> Table | None:
+        """Zellraster einer Tabelle ohne senkrechte Linien.
+
+        Zeilen: waagrechte Linien oder – ohne Linien – Farbbänder (Zebrazeilen); innerhalb eines Bandes nur
+        dann weiter geteilt, wenn alle Spalten gleich viele Textzeilen auf gleicher Höhe haben.
+        Spalten: hinterlegte Spalten oder Wortlücken. Ohne Zeilen-Belege → None (bisheriges Verfahren).
+        """
+        from quellenuebersetzer.pipeline.features import Rule
+        from quellenuebersetzer.pipeline.tables import shading_cuts, split_rows_in_band, word_columns
+
+        words = [w for ln in lines for w in ln.words if w.text.strip()]
+        if len(words) < 4 or work.color is None:
+            return None
+        x0, y0, x1, y1 = box
+        line_h = float(statistics.median(w.bbox[3] - w.bbox[1] for w in words))
+        tol = max(6, int(10 * scale))
+        hcuts = sorted(r.pos for r in rules if r.orient == "h" and r.length > 0.6 * (x1 - x0)
+                       and y0 + tol < r.pos < y1 - tol)
+        color = crop(work.color, box, pad=0)
+        ink = (crop(work.binary, box, pad=0) < 128)
+
+        def free_h(y: int) -> bool:  # keine Textzeile wird von der Grenze durchschnitten
+            return not any(w.bbox[1] + 0.25 * line_h < y < w.bbox[3] - 0.25 * line_h for w in words)
+
+        def free_v(x: int) -> bool:
+            return not any(w.bbox[0] + 2 < x < w.bbox[2] - 2 for w in words)
+
+        vcuts: list[int] = []
+        if not hcuts:
+            bands = [y0 + c for c in shading_cuts(color, ink, 0, max(int(1.2 * line_h), 20))]
+            bands = [y for y in bands if free_h(y)]
+            if len(bands) >= 2:
+                hcuts = bands  # Zebrazeilen
+            else:
+                vbands = [x0 + c for c in shading_cuts(color, ink, 1, max(int(3 * line_h), 40))]
+                vbands = [x for x in vbands if free_v(x)]
+                if len(vbands) < 2:
+                    return None
+                vcuts = vbands  # hinterlegte Spalten; Zeilen dann aus den Textzeilen
+                centers = sorted((w.bbox[1] + w.bbox[3]) / 2 for w in words)
+                groups: list[list[float]] = []
+                for c in centers:
+                    if groups and c - groups[-1][-1] < 0.6 * line_h:
+                        groups[-1].append(c)
+                    else:
+                        groups.append([c])
+                mids = [sum(g) / len(g) for g in groups]
+                hcuts = [int((a + b) / 2) for a, b in zip(mids, mids[1:])]
+        if not hcuts:
+            return None
+        if not vcuts:
+            cols = word_columns(lines)
+            vcuts = [x for x in ((a[1] + b[0]) // 2 for a, b in zip(cols, cols[1:])) if free_v(x)]
+        if not vcuts:
+            return None
+        col_bounds = [x0] + vcuts + [x1]
+        bounds = [y0] + hcuts + [y1]
+        extra = []
+        for a, b in zip(bounds, bounds[1:]):
+            extra += split_rows_in_band(words, a, b, col_bounds, line_h)
+        synthetic = [Rule("h", x0, y, x1, y + 1, "solid", 1, "#000000") for y in sorted(hcuts + extra)]
+        synthetic += [Rule("v", x, y0, x + 1, y1, "solid", 1, "#000000") for x in vcuts]
+        return table_from_rules(box, synthetic, tol=tol)
 
     @staticmethod
     def _line_h(binary_crop: np.ndarray) -> float:

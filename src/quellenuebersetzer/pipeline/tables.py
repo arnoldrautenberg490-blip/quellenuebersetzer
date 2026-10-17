@@ -321,3 +321,120 @@ def table_from_words(lines, min_rows: int = 2, min_cols: int = 2):
                 cells.append(Cell(r, c, 1, 1, ""))
     cells.sort(key=lambda c: (c.row, c.col))
     return Table(len(rows), len(columns), cells), cell_words
+
+
+# --------------------------------------------------------------------------- Raster aus Farbbändern und Wortlücken
+
+
+def shading_cuts(color: np.ndarray, ink: np.ndarray, axis: int, min_band: int) -> list[int]:
+    """Grenzen zwischen unterschiedlich hinterlegten Bändern (Zebrazeilen, hinterlegte Spalten).
+
+    ``axis = 0``: waagrechte Bänder (Zeilengrenzen, Rückgabe y), ``axis = 1``: senkrechte (Spaltengrenzen, x).
+    Gemessen wird nur an schriftfreien Pixeln (Median je Zeile bzw. Spalte), damit Text keine Grenzen erzeugt.
+    """
+    import cv2
+
+    if color.size == 0:
+        return []
+    lab = cv2.cvtColor(color, cv2.COLOR_BGR2LAB).astype(np.float32)
+    busy = cv2.dilate((ink > 0).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    if axis == 1:
+        lab, busy = lab.transpose(1, 0, 2), busy.T
+    n = lab.shape[0]
+    prof = np.full((n, 3), np.nan, np.float32)
+    step = max(1, lab.shape[1] // 400)
+    for i in range(n):
+        free = ~busy[i, ::step]
+        if free.sum() >= 8:
+            prof[i] = np.median(lab[i, ::step][free], axis=0)
+    ok = ~np.isnan(prof[:, 0])
+    if ok.sum() < 10:
+        return []
+    idx = np.arange(n)
+    for ch in range(3):  # Lücken (reine Schriftzeilen) überbrücken
+        prof[:, ch] = np.interp(idx, idx[ok], prof[ok, ch])
+    k = 5
+    smooth = np.stack([np.convolve(prof[:, ch], np.ones(k) / k, mode="same") for ch in range(3)], axis=1)
+    d = 3
+    diff = np.zeros(n)
+    diff[d:n - d] = np.linalg.norm(smooth[2 * d:] - smooth[:-2 * d], axis=1)
+    cuts: list[int] = []
+    i = 0
+    while i < n:
+        if diff[i] > 4.0:
+            j = i
+            while j + 1 < n and diff[j + 1] > 4.0:
+                j += 1
+            cuts.append(int(i + np.argmax(diff[i:j + 1])))
+            i = j + 1
+        else:
+            i += 1
+    # nur echte Bänder: Grenzen weit genug voneinander und vom Rand
+    out: list[int] = []
+    for c in cuts:
+        if c < min_band // 2 or c > n - min_band // 2:
+            continue
+        if out and c - out[-1] < min_band:
+            continue
+        out.append(c)
+    return out
+
+
+def word_columns(lines, min_gap: float | None = None) -> list[tuple[int, int]]:
+    """Spalten einer Tabelle ohne Linien: Bereiche, die durch Lücken getrennt sind, die in keiner Zeile von
+    einer Wortgruppe überdeckt werden."""
+    import statistics
+
+    words = [w for ln in lines for w in ln.words if w.text.strip()]
+    if not words:
+        return []
+    hmed = statistics.median(w.bbox[3] - w.bbox[1] for w in words) or 10
+    gap = min_gap or hmed * 0.8
+    phrases = []
+    for ln in lines:
+        ws = sorted((w for w in ln.words if w.text.strip()), key=lambda w: w.bbox[0])
+        if not ws:
+            continue
+        cur = [ws[0]]
+        for w in ws[1:]:
+            if w.bbox[0] - cur[-1].bbox[2] < hmed * 1.2:
+                cur.append(w)
+            else:
+                phrases.append((cur[0].bbox[0], cur[-1].bbox[2]))
+                cur = [w]
+        phrases.append((cur[0].bbox[0], cur[-1].bbox[2]))
+    spans = sorted(phrases)
+    columns = [[spans[0][0], spans[0][1]]]
+    for a, b in spans[1:]:
+        if a - columns[-1][1] > gap:
+            columns.append([a, b])
+        else:
+            columns[-1][1] = max(columns[-1][1], b)
+    return [(int(a), int(b)) for a, b in columns]
+
+
+def split_rows_in_band(words, a: int, b: int, col_bounds: list[int], line_h: float) -> list[int]:
+    """Weitere Zeilengrenzen in einem Band: nur wenn ALLE belegten Spalten gleich viele, auf gleicher Höhe
+    liegende Textzeilen haben (z. B. ein Farbband über mehrere Tabellenzeilen). Eine mehrzeilige Zelle neben
+    einzeiligen bleibt dagegen eine Zeile."""
+    per_col = []
+    for c0, c1 in zip(col_bounds, col_bounds[1:]):
+        ys = sorted((w.bbox[1] + w.bbox[3]) / 2 for w in words
+                    if a <= (w.bbox[1] + w.bbox[3]) / 2 < b and c0 <= (w.bbox[0] + w.bbox[2]) / 2 < c1)
+        centers: list[list[float]] = []
+        for y in ys:
+            if centers and y - centers[-1][-1] < 0.6 * line_h:
+                centers[-1].append(y)
+            else:
+                centers.append([y])
+        if centers:
+            per_col.append([sum(c) / len(c) for c in centers])
+    if len(per_col) < 2 or len({len(p) for p in per_col}) != 1 or len(per_col[0]) < 2:
+        return []
+    k = len(per_col[0])
+    for i in range(k):
+        vals = [p[i] for p in per_col]
+        if max(vals) - min(vals) > 0.5 * line_h:
+            return []
+    means = [sum(p[i] for p in per_col) / len(per_col) for i in range(k)]
+    return [int((means[i] + means[i + 1]) / 2) for i in range(k - 1)]

@@ -16,12 +16,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+import cv2
 import numpy as np
 
 from quellenuebersetzer.pipeline.features import PageFeatures, Panel
 from quellenuebersetzer.runtime.layout import (
     MARGIN_KINDS,
     Region,
+    _trim,
     _xy_cut,
     merge_lines,
     resolve_overlaps,
@@ -120,10 +122,140 @@ def split_columns(box, ink: np.ndarray, scale: float) -> list[tuple[int, int, in
     return out or [box]
 
 
+# --------------------------------------------------------------------------- Strukturwechsel innerhalb eines Bereichs
+
+
+def _lab_median(pixels: np.ndarray) -> np.ndarray | None:
+    if pixels.size == 0:
+        return None
+    px = pixels.reshape(-1, 3)
+    if len(px) > 4000:
+        px = px[:: len(px) // 4000]
+    lab = cv2.cvtColor(np.median(px, axis=0).astype(np.uint8).reshape(1, 1, 3), cv2.COLOR_BGR2LAB)
+    return lab[0, 0].astype(float)
+
+
+def _row_info(sub_ink: np.ndarray, sub_color: np.ndarray, a: int, b: int, min_gap: int) -> dict:
+    band = sub_ink[a:b] > 0
+    cols = band.any(axis=0)
+    xs = np.flatnonzero(cols)
+    x0, x1 = int(xs[0]), int(xs[-1]) + 1
+    inner = ~cols[x0:x1]
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], inner.astype(np.int8), [0]])))
+    gaps = [(x0 + int(s), x0 + int(e)) for s, e in zip(edges[0::2], edges[1::2]) if e - s >= min_gap]
+    color_band = sub_color[a:b]
+    return {"a": a, "b": b, "x0": x0, "x1": x1, "gaps": gaps,
+            "bg": _lab_median(color_band[~band]), "ink": _lab_median(color_band[band])}
+
+
+def _differs(lab1, lab2, limit: float) -> bool:
+    return lab1 is not None and lab2 is not None and float(np.linalg.norm(lab1 - lab2)) > limit
+
+
+def split_structure(box, ink: np.ndarray, color: np.ndarray | None, scale: float) -> list[tuple[int, int, int, int]]:
+    """Teilt einen Textbereich dort waagrecht, wo sich die Struktur ändert – Breite, Spaltenaufteilung,
+    Hintergrundfarbe oder Schriftfarbe –, und danach jede Gruppe an echten Spaltenlücken.
+
+    So bleibt ein breiterer Kasten, eine spaltenübergreifende Überschrift oder ein farbiger Block immer ein
+    eigener Block, auch wenn das Layoutmodell ihn mit einer Spalte zu einem Rechteck zusammengefasst hat.
+    """
+    x0, y0, x1, y1 = box
+    sub_ink = ink[y0:y1, x0:x1]
+    if sub_ink.size == 0 or color is None:
+        return split_columns(box, ink, scale)
+    sub_color = color[y0:y1, x0:x1]
+    rows = _text_rows(sub_ink > 0)
+    if len(rows) < 2:
+        return split_columns(box, ink, scale)
+    row_h = float(np.median([b - a for a, b in rows]))
+    min_gap = max(int(18 * scale), int(0.6 * row_h))
+    tol = max(int(2.5 * row_h), int(0.05 * (x1 - x0)))
+    infos = [_row_info(sub_ink, sub_color, a, b, min_gap) for a, b in rows]
+
+    def gap_at(info: dict, center: int) -> bool:
+        return any(s - min_gap <= center <= e + min_gap for s, e in info["gaps"])
+
+    groups: list[list[dict]] = [[infos[0]]]
+    for i, info in enumerate(infos[1:], start=1):
+        grp = groups[-1]
+        gx0 = int(np.median([r["x0"] for r in grp]))
+        gx1 = max(r["x1"] for r in grp)
+        common = [(s + e) // 2 for s, e in grp[0]["gaps"] if all(gap_at(r, (s + e) // 2) for r in grp)]
+        change = (
+            _differs(info["bg"], grp[-1]["bg"], 6.0)  # andere Hintergrundfarbe
+            or _differs(info["ink"], grp[-1]["ink"], 30.0)  # andere Schriftfarbe
+            # breiter als die Gruppe (rechts erst ab einem Viertel mehr – kurze erste Zeilen sind normal)
+            or info["x0"] < gx0 - tol or info["x1"] > gx1 + max(tol, (gx1 - gx0) // 4)
+            or info["x0"] > gx0 + tol  # links eingerückt bzw. zentriert schmaler (z. B. Überschrift)
+            # Spaltenlücke der Gruppe wird überquert oder nur eine Seite ist belegt
+            or any(not gap_at(info, c) or info["x1"] <= c or info["x0"] >= c for c in common)
+        )
+        if not change and not common and info["gaps"] and i + 1 < len(infos):
+            # neue Spaltenlücke, die auch in der nächsten Zeile besteht → hier beginnt ein mehrspaltiger Teil
+            nxt = infos[i + 1]
+            centers = [(s + e) // 2 for s, e in info["gaps"]]
+            change = any(gap_at(nxt, c) and not any(gap_at(r, c) for r in grp) for c in centers)
+        if change:
+            groups.append([info])
+        else:
+            grp.append(info)
+    out: list[tuple[int, int, int, int]] = []
+    for grp in groups:
+        gbox = (x0 + min(r["x0"] for r in grp), y0 + grp[0]["a"], x0 + max(r["x1"] for r in grp), y0 + grp[-1]["b"])
+        out.extend(split_columns(gbox, ink, scale))
+    return out or [box]
+
+
+def style_key(box, ink: np.ndarray, color: np.ndarray | None) -> str:
+    """Grobe Gestaltung eines Bereichs (Hintergrund, Schriftfarbe) – nur Gleiches wird zusammengelegt."""
+    if color is None:
+        return ""
+    x0, y0, x1, y1 = box
+    band = ink[y0:y1, x0:x1] > 0
+    sub = color[y0:y1, x0:x1]
+    parts = []
+    for lab, step in ((_lab_median(sub[~band]), 20), (_lab_median(sub[band]), 75)):
+        if lab is None:
+            parts.append("-")
+            continue
+        chroma = float(np.hypot(lab[1] - 128, lab[2] - 128))
+        hue = int(np.degrees(np.arctan2(lab[2] - 128, lab[1] - 128)) // 45) if chroma > 12 else -1
+        parts.append(f"{int(lab[0] // step)}:{hue}")
+    return "|".join(parts)
+
+
+def ensure_disjoint(regions: list[Region]) -> list[Region]:
+    """Garantie: kein Bereich überlappt einen anderen. Der kleinere wird am größeren beschnitten;
+    liegt er (fast) ganz darin, entfällt er (sein Inhalt gehört dann zum größeren)."""
+    kept: list[Region] = []
+    for r in sorted(regions, key=lambda r: -_area(r.box)):
+        box = r.box
+        for k in kept:
+            inter = _inter(box, k.box)
+            if not inter:
+                continue
+            if _area(inter) > 0.6 * _area(box):
+                box = None
+                break
+            box = _trim(box, k.box)
+            if box is None:
+                break
+        if box is not None:
+            r.box = box
+            kept.append(r)
+    return sorted(kept, key=lambda r: r.order)
+
+
 def _assign_containers(regions: list[Region], boxes: dict[str, Panel], ink: np.ndarray) -> list[Region]:
     out: list[Region] = []
     for r in regions:
         if r.kind in FIGURE_KINDS or r.kind == "tabelle":
+            # Tabellen und Abbildungen werden nie geteilt – liegen sie in einem Kasten, gehören sie zu ihm
+            for kid, p in boxes.items():
+                inter = _inter(r.box, p.box)
+                if inter and _area(inter) > 0.85 * _area(r.box):
+                    r.container = kid
+                    break
             out.append(r)
             continue
         pending = [r]
@@ -180,6 +312,37 @@ def _margin_rules(regions: list[Region], w: int, h: int) -> None:
             r.kind = "absatz"
 
 
+def _reconcile_tables(regions: list[Region], boxes: dict[str, Panel], page_h: int) -> None:
+    """Hinterlegungen in oder an einer Tabelle sind Teil der Tabelle, keine Kästen.
+
+    - Ein Streifen ganz in einer Tabelle (Zebrazeile, hinterlegte Spalte, Kopfzeile) ist kein Kasten.
+    - Eine hinterlegte Fläche, die eine Tabelle seitlich anschneidet und dieselbe Höhe hat, ist eine
+      abgeschnittene hinterlegte Spalte: Die Tabelle wird um sie erweitert.
+    - Meldet das Modell einen ganzen Kasten als Tabelle und darin eine kleinere Tabelle, gilt die kleinere;
+      der Kasten bleibt Kasten (mit seinem übrigen Text).
+    """
+    tables = [r for r in regions if r.kind == "tabelle"]
+    for t in list(tables):
+        inner = [o for o in tables if o is not t and (i := _inter(o.box, t.box)) and _area(i) > 0.7 * _area(o.box)]
+        if inner and any(_iou(t.box, p.box) > 0.7 for p in boxes.values()):
+            regions.remove(t)
+            tables.remove(t)
+    tol = max(8, int(0.01 * page_h))
+    for kid, p in list(boxes.items()):
+        for t in tables:
+            inter = _inter(p.box, t.box)
+            if not inter:
+                continue
+            if _area(inter) > 0.8 * _area(p.box):
+                del boxes[kid]  # Streifen in der Tabelle
+                break
+            same_rows = p.box[1] >= t.box[1] - tol and p.box[3] <= t.box[3] + tol
+            if same_rows and _area(inter) < 0.8 * _area(t.box):
+                t.box = (min(t.box[0], p.box[0]), t.box[1], max(t.box[2], p.box[2]), t.box[3])
+                del boxes[kid]  # angeschnittene hinterlegte Spalte
+                break
+
+
 def _read_order(regions: list[Region], boxes: dict[str, Panel]) -> list[Region]:
     head = [r for r in regions if r.kind == "kopfzeile" and not r.container]
     side = [r for r in regions if r.kind == "randnotiz" and not r.container]
@@ -205,7 +368,8 @@ def _read_order(regions: list[Region], boxes: dict[str, Panel]) -> list[Region]:
     return ordered
 
 
-def build(raw: list[Region], feats: PageFeatures, ink: np.ndarray) -> tuple[list[Region], list[dict]]:
+def build(raw: list[Region], feats: PageFeatures, ink: np.ndarray,
+          color: np.ndarray | None = None) -> tuple[list[Region], list[dict]]:
     """Endgültige Bereiche und Kästen (Dekorationen) einer Seite."""
     w, h = feats.width, feats.height
     scale = w / 2480.0
@@ -238,6 +402,9 @@ def build(raw: list[Region], feats: PageFeatures, ink: np.ndarray) -> tuple[list
         regions = [r for r in regions if r.kind == "tabelle" or r.kind in FIGURE_KINDS
                    or not _inter(r.box, g.box) or _area(_inter(r.box, g.box)) < 0.5 * _area(r.box)]
 
+    # 2b. Tabellen und Flächen abstimmen
+    _reconcile_tables(regions, boxes, h)
+
     # 3. Textbereiche an Kastengrenzen teilen und Kästen zuordnen
     regions = _assign_containers(regions, boxes, ink)
     for kid, p in boxes.items():
@@ -248,19 +415,25 @@ def build(raw: list[Region], feats: PageFeatures, ink: np.ndarray) -> tuple[list
             if found or p.dark:
                 regions.append(Region("absatz", found or inner, 0.5, 10_000, kid))
 
-    # 4. Spalten: Textbereiche über einer durchgehenden senkrechten Lücke teilen
+    # 4. Struktur: an Wechseln von Breite, Spaltenaufteilung und Farbe waagrecht teilen, dann an Spaltenlücken
     split: list[Region] = []
     for r in regions:
         if r.kind in TEXT_SPLIT_KINDS:
-            parts = split_columns(r.box, ink, scale)
+            parts = split_structure(r.box, ink, color, scale)
             if len(parts) > 1:
                 split.extend(Region(r.kind, b, r.score, r.order + i * 0.01, r.container)
                              for i, b in enumerate(parts))
                 continue
         split.append(r)
 
-    # 5. Zusammenlegen (nur im selben Fluss), Überlappungen auflösen, Lage am Rand, Reihenfolge
-    regions = resolve_overlaps(merge_lines(split))
+    # 5. Zusammenlegen (nur gleiche Breite, gleicher Fluss, gleiche Gestaltung), Überlappungen auflösen,
+    #    Lage am Rand, Reihenfolge
+    for r in split:
+        r.style = style_key(r.box, ink, color) if r.kind == "absatz" else r.kind
+    row_hs = [b - a for r in split if r.kind == "absatz"
+              for a, b in _text_rows(ink[r.box[1]:r.box[3], r.box[0]:r.box[2]] > 0)]
+    line_px = float(np.median(row_hs)) * 1.6 if row_hs else None  # Zeilenhöhe samt Durchschuss
+    regions = ensure_disjoint(resolve_overlaps(merge_lines(split, line_px)))
     _margin_rules(regions, w, h)
     regions = _read_order(regions, boxes)
     decorations = []

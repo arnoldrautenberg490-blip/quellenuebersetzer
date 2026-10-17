@@ -164,13 +164,28 @@ class Canvas:
 
     # ------------------------------------------------------------------ Tabelle
     def table(self, x: int, y: int, col_w: list[int], rows: list[list[str]], lines: str, header: bool,
-              header_style: str = "bold", size: int = 38, row_h: int = 78) -> TBlock:
-        """lines: solid | dashed | dotted | faint | horizontal | none; header_style: bold | shaded | rule."""
+              header_style: str = "bold", size: int = 38, row_h: int = 78, shading: str = "") -> TBlock:
+        """lines: solid | dashed | dotted | faint | horizontal | none; header_style: bold | shaded | rule;
+        shading: "" | zebra (jede zweite Zeile hinterlegt) | columns (jede zweite Spalte hinterlegt).
+        Zellen mit „\\n“ werden mehrzeilig gesetzt (die Zeile wird entsprechend höher)."""
         n_rows, n_cols = len(rows), len(col_w)
         xs = [x]
         for w in col_w:
             xs.append(xs[-1] + w)
-        ys = [y + r * row_h for r in range(n_rows + 1)]
+        step = int(size * 1.25)
+        heights = [row_h + step * (max(v.count("\n") for v in row)) for row in rows]
+        ys = [y]
+        for hgt in heights:
+            ys.append(ys[-1] + hgt)
+        tint = (232, 236, 244)
+        if shading == "zebra":
+            for r in range(n_rows):
+                if r % 2 == 1:
+                    self.d.rectangle([xs[0], ys[r], xs[-1], ys[r + 1]], fill=tint)
+        elif shading == "columns":
+            for c in range(n_cols):
+                if c % 2 == 1:
+                    self.d.rectangle([xs[c], ys[0], xs[c + 1], ys[-1]], fill=tint)
         if header and header_style == "shaded":
             self.d.rectangle([xs[0], ys[0], xs[-1], ys[1]], fill=(215, 222, 232))
         if lines in ("solid", "dashed", "dotted", "faint"):
@@ -189,9 +204,11 @@ class Canvas:
         for r, row in enumerate(rows):
             for c, val in enumerate(row):
                 f = font(size, bold=header and r == 0 and header_style == "bold")
-                self.d.text((xs[c] + 20, ys[r] + (row_h - size) // 2 - 4), val, font=f, fill=INK)
-        words = [w for row in rows for v in row for w in v.split()]
-        t = {"rows": n_rows, "cols": n_cols, "header": header, "cells": rows, "lines": lines}
+                for k, part in enumerate(val.split("\n")):
+                    self.d.text((xs[c] + 20, ys[r] + (row_h - size) // 2 - 4 + k * step), part, font=f, fill=INK)
+        cells = [[v.replace("\n", " ") for v in row] for row in rows]
+        words = [w for row in cells for v in row for w in v.split()]
+        t = {"rows": n_rows, "cols": n_cols, "header": header, "cells": cells, "lines": lines}
         return self.add(TBlock("", "tabelle", (xs[0], ys[0], xs[-1], ys[-1]), f"tabelle{len(self.blocks) + 1}", words,
                                table=t))
 
@@ -322,6 +339,73 @@ def p_gemischt(c: Canvas) -> None:
     c.paragraph(250, 2500, 1980, 50, 40, "text3")
 
 
+def p_spaltenuebergreifend(c: Canvas) -> None:
+    """Zwei Spalten, dazwischen ein breiter farbiger Kasten ohne Rahmen und eine Zwischenüberschrift über beide
+    Spalten, darunter wieder zwei Spalten – breitere Elemente dürfen nie mit einer Spalte verschmelzen."""
+    c.paragraph(250, 250, 960, 45, 40, "spalte1a")
+    c.paragraph(1270, 250, 960, 45, 40, "spalte2a")
+    c.box((250, 700, 2230, 1150), (226, 236, 248), "", flow="kasten1")  # zartes Blau, kein Rahmen
+    c.paragraph(300, 740, 1880, 60, 40, "kasten1")
+    c.paragraph(250, 1210, 1980, 0, 50, "zwischen", "ueberschrift", bold=True, color=(150, 40, 30),
+                words="Rejestr młynów i karczem".split())
+    c.paragraph(250, 1330, 960, 70, 40, "spalte1b")
+    c.paragraph(1270, 1330, 960, 70, 40, "spalte2b")
+    c.paragraph(250, 2050, 960, 60, 40, "spalte1c")
+    c.box((1270, 2050, 2000, 2500), (250, 236, 200), "", flow="kasten2")  # schmaler als die Spalte
+    c.paragraph(1310, 2090, 650, 30, 36, "kasten2")
+
+
+def p_farbige_bloecke(c: Canvas) -> None:
+    """Eng gesetzte Blöcke, die sich nur durch Farbe unterscheiden: farbige Unterüberschrift direkt über dem
+    Fließtext, getönte Bänder über die ganze Breite direkt unter und über Spaltentext."""
+    c.paragraph(250, 250, 1980, 0, 46, "titel", "ueberschrift", bold=True, color=(30, 70, 150),
+                words="Przywileje miejskie".split())
+    c.paragraph(250, 330, 1980, 60, 40, "text1")  # direkt darunter, normaler Zeilenabstand
+    c.box((250, 760, 2230, 1060), (238, 228, 242), "", flow="band1")
+    c.paragraph(300, 790, 1880, 40, 40, "band1")
+    c.paragraph(250, 1080, 960, 60, 40, "spalte1")
+    c.paragraph(1270, 1080, 960, 60, 40, "spalte2")
+    c.box((250, 1700, 2230, 1950), (230, 240, 226), "", flow="band2")
+    c.paragraph(300, 1730, 1880, 30, 40, "band2")
+    c.paragraph(250, 1970, 1980, 50, 40, "text2", color=(120, 30, 30))  # ganzer Absatz in Rot
+
+
+def p_tabelle_zebra(c: Canvas) -> None:
+    """Tabelle ohne Linien, jede zweite Zeile zart hinterlegt, Kopfzeile fett."""
+    c.paragraph(250, 250, 1980, 40, 42, "text")
+    c.table(250, 600, [760, 420, 420, 420], c.table_rows(9, 4, True), "none", True, "bold", shading="zebra")
+    c.paragraph(250, 1450, 1980, 40, 42, "text2")
+
+
+def p_tabelle_mehrzeilig(c: Canvas) -> None:
+    """Zellen mit Zeilenumbruch: oben mit Zebrastreifen, unten nur mit waagrechten Linien – je Zelle ein Inhalt."""
+    c.paragraph(250, 250, 1980, 30, 42, "text")
+    rows = c.table_rows(6, 3, True)
+    for r in (1, 3, 4):
+        rows[r][0] = rows[r][0] + "\n" + c.rng.choice(WORDS) + " " + c.rng.choice(WORDS)
+    c.table(250, 520, [900, 450, 450], rows, "none", True, "bold", shading="zebra")
+    rows2 = c.table_rows(5, 3, False)
+    for r in (0, 2):
+        rows2[r][0] = rows2[r][0] + "\n" + c.rng.choice(WORDS)
+    c.table(250, 1700, [900, 450, 450], rows2, "horizontal", False)
+
+
+def p_tabelle_spalten(c: Canvas) -> None:
+    """Tabelle ohne Linien mit hinterlegten Spalten und nur hinterlegter Kopfzeile darüber."""
+    c.paragraph(250, 250, 1980, 30, 42, "text")
+    c.table(250, 520, [700, 400, 400, 400], c.table_rows(8, 4, False), "none", False, shading="columns")
+    c.table(250, 1450, [700, 500, 500], c.table_rows(6, 3, True), "none", True, "shaded")
+
+
+def p_tabelle_im_kasten(c: Canvas) -> None:
+    """Tabelle ohne Linien in einem farbigen Kasten, darüber Kastentext."""
+    c.paragraph(250, 250, 1980, 40, 42, "text")
+    c.box((250, 650, 2230, 1500), (238, 232, 214), "solid", (120, 100, 60), flow="kasten1")
+    c.paragraph(310, 690, 1860, 25, 40, "kasten1")
+    c.table(310, 900, [700, 380, 380], c.table_rows(6, 3, True), "none", True, "bold")
+    c.paragraph(250, 1580, 1980, 40, 42, "text2")
+
+
 PAGE_TYPES = {
     "zweispaltig": p_zweispaltig,
     "dreispaltig": p_dreispaltig,
@@ -333,6 +417,12 @@ PAGE_TYPES = {
     "tabelle_ohne_linien": p_tabelle_ohne_linien,
     "marginalien": p_marginalien,
     "gemischt": p_gemischt,
+    "spaltenuebergreifend": p_spaltenuebergreifend,
+    "farbige_bloecke": p_farbige_bloecke,
+    "tabelle_zebra": p_tabelle_zebra,
+    "tabelle_mehrzeilig": p_tabelle_mehrzeilig,
+    "tabelle_spalten": p_tabelle_spalten,
+    "tabelle_im_kasten": p_tabelle_im_kasten,
 }
 
 
