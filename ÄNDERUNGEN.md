@@ -64,6 +64,8 @@ Stand: 17.10.2026 · Version 0.1.0 (in Entwicklung, noch nicht veröffentlicht)
   (schneller Seitenaufbau und beim Fortsetzen erledigte Seiten verzerrten die Hochrechnung).
 
 ## Ausgabe
+- Ergebnisse lassen sich auch auf ein anderes Laufwerk speichern (USB-Stick, D:) – vorher brach das Verschieben
+  aus dem Arbeitsordner dort ab.
 - Seitengetreu als PDF (Typst) und Word (positionierte Rahmen): Faksimile (Original als Hintergrund,
   Schrift retuschiert) oder Neusatz; Schrift wird bei längerem deutschem Text behutsam eingepasst;
   Anmerkungen und Hinweise im Anhang.

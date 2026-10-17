@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -180,5 +181,5 @@ class Exporter:
             raise ExportError(f"{FORMATS[fmt][0]} konnte nicht erzeugt werden: {msg}")
         if dest.exists():
             dest.unlink()
-        tmp_out.replace(dest)
+        shutil.move(str(tmp_out), str(dest))  # auch auf ein anderes Laufwerk (USB-Stick, D:)
         return dest

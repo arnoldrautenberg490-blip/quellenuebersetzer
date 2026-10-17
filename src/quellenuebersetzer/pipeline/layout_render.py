@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -407,7 +408,7 @@ def render_pdf(doc: LayoutDocument, out: Path, typst: Path, faksimile: bool = Tr
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         out.unlink()
-    tmp.replace(out)
+    shutil.move(str(tmp), str(out))  # auch auf ein anderes Laufwerk (USB-Stick, D:)
     return out
 
 
