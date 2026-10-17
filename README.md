@@ -18,9 +18,11 @@ Bedeutungswandel und Begriffe der Zeit werden markiert und in Fußnoten erläute
 
 ## Installation
 
-1. `Quellenuebersetzer-Setup-x.y.z.exe` herunterladen (Seite „Releases“) und starten.
-   Keine Administratorrechte nötig. Falls Windows „Der Computer wurde durch Windows geschützt“ meldet:
-   „Weitere Informationen“ → „Trotzdem ausführen“.
+1. `Quellenuebersetzer-Setup-x.y.z.exe` von der Seite
+   [Releases](https://github.com/arnoldrautenberg490-blip/quellenuebersetzer/releases) herunterladen und starten.
+   Keine Administratorrechte nötig. Die Prüfsumme steht in `SHA256.txt` daneben.
+   Solange eine Version noch nicht signiert ist, meldet Windows „Der Computer wurde durch Windows geschützt“:
+   „Weitere Informationen“ → „Trotzdem ausführen“ (siehe `LIESMICH.txt`).
 2. Im Programm Quellenart, Sprache und Zeitraum ankreuzen.
 3. Der Installationsplan zeigt, was für diesen Rechner passt (Ampel, „Optimal: Ja/Nein“).
    Ein Klick auf „Installieren“ lädt alles Nötige (je nach Grafikkarte 5–25 GB).
@@ -97,3 +99,24 @@ Testmaterial ist ausschließlich synthetisch oder gemeinfrei. **Niemals echte Qu
 ## Lizenz
 
 GNU General Public License 3.0 oder später. Lizenzen der Bausteine: siehe „Über das Programm“ im Programm.
+Wörterbuchdaten: Wiktionary (CC BY-SA 4.0, über kaikki.org), Zygmunt Gloger, *Encyklopedja staropolska*
+(1900–1903, gemeinfrei).
+
+## Code-Signatur-Richtlinie / Code signing policy
+
+Kostenlose Code-Signatur bereitgestellt von [SignPath.io](https://about.signpath.io), Zertifikat von der
+[SignPath Foundation](https://signpath.org).
+*Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org).*
+
+- **Rollen / Roles:** Autor, Prüfer und Freigabe / committer, reviewer and approver:
+  [arnoldrautenberg490-blip](https://github.com/arnoldrautenberg490-blip).
+- **Herkunft / Provenance:** Signiert werden ausschließlich Dateien, die der öffentliche automatische Bau
+  (`.github/workflows/bauen.yml`) aus dem Quellcode dieses Repositorys erzeugt; jede Signatur wird einzeln
+  freigegeben. *Only binaries built by the public GitHub Actions workflow from this repository's source are
+  signed; every signing request is approved manually.*
+- **Datenschutz / Privacy:** Das Programm überträgt keine Daten an Dritte. Netzzugang besteht nur bei der
+  Installation der Bausteine (Download mit Prüfsumme) und bei der Update-Prüfung auf Knopfdruck; während der
+  Verarbeitung ist die Verarbeitungsumgebung vom Netz abgeschottet. Keine Telemetrie, keine Konten.
+  *This program will not transfer any information to other networked systems unless specifically requested by
+  the user or the person installing or operating it (component download at installation, update check on demand).*

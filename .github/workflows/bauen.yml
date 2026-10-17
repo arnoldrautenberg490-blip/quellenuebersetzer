@@ -1,5 +1,6 @@
-# Automatischer Bau: Tests → Programm (PyInstaller) → Setup.exe (Inno Setup) → bei Versions-Tag: Veröffentlichung.
-# Keine Kosten: GitHub Actions ist für öffentliche Projekte kostenlos.
+# Automatischer Bau: Tests → Programm (PyInstaller) → Setup.exe (Inno Setup) → Signatur → bei Versions-Tag: Veröffentlichung.
+# Keine Kosten: GitHub Actions ist für öffentliche Projekte kostenlos, die Signatur übernimmt die SignPath Foundation
+# (kostenlos für Open-Source-Projekte). Jede veröffentlichte Datei entsteht hier direkt aus dem Quellcode.
 name: Bauen
 
 on:
@@ -15,6 +16,9 @@ permissions:
 jobs:
   bauen:
     runs-on: windows-latest
+    env:
+      # Signatur nur, wenn das Projekt bei SignPath freigeschaltet ist (Geheimnis im Repository hinterlegt)
+      SIGNPATH_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +29,15 @@ jobs:
       - name: Abhängigkeiten
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          python -m pip install -e .
+          python -m pip install "pytest>=8"
+
+      - name: PyInstaller mit selbst übersetztem Programmstarter
+        # Der fertig mitgelieferte Starter ist die häufigste Ursache für Fehlalarme von Virenscannern,
+        # weil er in vielen fremden Programmen steckt. Aus dem Quellcode übersetzt ist er einzigartig.
+        env:
+          PYINSTALLER_COMPILE_BOOTLOADER: "1"
+        run: python -m pip install --no-binary pyinstaller "pyinstaller==6.22.3"
 
       - name: Testumgebung (Tesseract, Pandoc, Typst über den eigenen Installer)
         run: python tools/testumgebung.py "${{ runner.temp }}\testroot"
@@ -49,19 +61,41 @@ jobs:
           if (-not $iscc) { choco install innosetup --no-progress -y; $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe" | Select-Object -First 1 }
           & $iscc.FullName "/DAppVersion=$version" packaging\setup.iss
 
-      # Signatur (kostenlos über die SignPath Foundation, sobald der Antrag bewilligt ist):
-      # - uses: signpath/github-action-submit-signing-request@v1
-      #   with: { api-token: "${{ secrets.SIGNPATH_API_TOKEN }}", organization-id: "…", project-slug: "quellenuebersetzer",
-      #           signing-policy-slug: "release-signing", artifact-configuration-slug: "setup", github-artifact-id: "…" }
-
-      - uses: actions/upload-artifact@v4
+      - name: Unsignierte Setup.exe ablegen
+        id: unsigniert
+        uses: actions/upload-artifact@v4
         with:
-          name: Quellenuebersetzer-Setup
+          name: Quellenuebersetzer-Setup-unsigniert
           path: build/setup/*.exe
+
+      - name: Signieren (SignPath Foundation)
+        if: env.SIGNPATH_TOKEN != '' && startsWith(github.ref, 'refs/tags/v')
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: quellenuebersetzer
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: setup
+          github-artifact-id: ${{ steps.unsigniert.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: build/signiert
+
+      - name: Signierte Datei übernehmen
+        if: env.SIGNPATH_TOKEN != '' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: Copy-Item build/signiert/*.exe build/setup/ -Force
 
       - name: Prüfsumme
         shell: pwsh
         run: Get-ChildItem build/setup/*.exe | ForEach-Object { (Get-FileHash $_ -Algorithm SHA256).Hash + "  " + $_.Name } | Out-File build/setup/SHA256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Quellenuebersetzer-Setup
+          path: |
+            build/setup/*.exe
+            build/setup/SHA256.txt
 
       - name: Veröffentlichen (nur bei Versions-Tag)
         if: startsWith(github.ref, 'refs/tags/v')

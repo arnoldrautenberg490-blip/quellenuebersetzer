@@ -30,9 +30,16 @@ Am Ende jedes Dokuments steht ein Verzeichnis aller markierten Stellen.
 
 Windows-Warnung beim ersten Start
 ---------------------------------
-Erscheint „Der Computer wurde durch Windows geschützt“, auf „Weitere Informationen“ und dann auf
-„Trotzdem ausführen“ klicken. Die Meldung erscheint, weil das Programm (noch) nicht mit einem
-kostenpflichtigen Zertifikat signiert ist.
+Signierte Versionen (Herausgeber „SignPath Foundation“) starten ohne Warnung. Bei einer noch nicht
+signierten Version erscheint ein blaues Fenster „Der Computer wurde durch Windows geschützt“:
+
+  1. Im blauen Fenster auf den unterstrichenen Text „Weitere Informationen“ klicken.
+  2. Unten erscheint die Schaltfläche „Trotzdem ausführen“ – darauf klicken.
+
+Die Meldung bedeutet nicht, dass etwas Schädliches gefunden wurde, sondern nur, dass Windows die Datei
+noch nicht kennt. Die Prüfsumme der Datei steht in „SHA256.txt“ auf der Download-Seite.
+Ist auf dem Rechner „Intelligente App-Steuerung“ (Smart App Control) eingeschaltet, lassen sich nur
+signierte Versionen starten.
 
 Entfernen
 ---------
