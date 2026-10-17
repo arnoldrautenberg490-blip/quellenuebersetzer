@@ -181,3 +181,55 @@ def test_changed_years_in_text_are_rejected():
     ])
     out = _tr(c).translate_segment(Segment("text", "Akta miasta Krakowa z roku 1785."))
     assert "1785" in out and "Numbers" in c.requests[1][-1]["content"]
+
+
+# --------------------------------------------------------------------------- Beschleunigung
+
+
+def test_too_many_marks_are_repaired_locally_without_new_request():
+    terms = [{"id": f"b2_{i}", "original": w, "explanation": "x", "evidence": ""} for i, w in
+             enumerate(["starosta", "przywilej", "miasto"], start=1)]
+    c = ScriptedClient([{
+        "translation": "Der <b2_1>Starost</b2_1> bestätigte das <b2_2>Privileg</b2_2> der <b2_3>Stadt</b2_3>.",
+        "readings": [], "terms": terms}])
+    tr = _tr(c)
+    out = tr.translate_segment(Segment("text", "Starosta zatwierdził przywilej miasta."))
+    assert len(c.requests) == 1 and tr.stats.repairs == 1 and tr.stats.retries == 0
+    assert markup.strip_marks(out) == "Der Starost bestätigte das Privileg der Stadt."
+    assert len(markup.find_marks(out)) <= 2
+
+
+def test_copied_example_explanation_is_not_passed_off_as_real():
+    from quellenuebersetzer.pipeline.translate import EXAMPLE_EXPLANATION
+
+    c = ScriptedClient([{"translation": "Der <b2_1>Wojewode</b2_1> berief den <b2_2>Landtag</b2_2> ein.",
+                         "readings": [],
+                         "terms": [{"id": "b2_1", "original": "wojewoda", "explanation": EXAMPLE_EXPLANATION},
+                                   {"id": "b2_2", "original": "sejmik", "explanation": "Versammlung des Adels"}]}])
+    out = _tr(c).translate_segment(Segment("text", "Wojewoda zwołał sejmik."))
+    marks = [m for _s, _e, m in markup.find_marks(out)]
+    assert [m.attrs["original"] for m in marks] == ["sejmik"]
+    assert markup.strip_marks(out) == "Der Wojewode berief den Landtag ein."
+
+
+def test_staged_mode_refines_only_hard_units():
+    from quellenuebersetzer.pipeline.layout_doc import LayoutDocument, LPage, LRegion
+    from quellenuebersetzer.pipeline.layout_translate import translate_layout
+
+    easy = LRegion("s1b1", "absatz", (0, 0, 10, 10), 0, "Rada miejska zebrała się w ratuszu.")
+    hard = LRegion("s1b2", "ueberschrift", (0, 20, 10, 30), 1,
+                   "O " + markup.mark_reading("młynach", ["młynach", "murach"], 0.4))
+    doc = LayoutDocument("q", "Q", "druck", ".", [LPage(1, 100, 100, 300, "x.png", [easy, hard])])
+    draft = ScriptedClient([
+        {"translation": "Der Stadtrat versammelte sich im Rathaus.", "readings": [], "terms": []},
+        {"translation": "Über <a_1>Mühlen</a_1>", "readings": [{"id": "a_1", "translations": ["Mühlen", "Mauern"]}],
+         "terms": []},
+    ])
+    big = ScriptedClient([
+        {"translation": "Von den <a_1>Mühlen</a_1>", "readings": [{"id": "a_1", "translations": ["Mühlen", "Mauern"]}],
+         "terms": []},
+    ])
+    translate_layout(doc, _tr(draft), refine=_tr(big))
+    assert len(big.requests) == 1  # nur der schwierige Abschnitt (unsichere Lesung)
+    assert easy.target_md == "Der Stadtrat versammelte sich im Rathaus."
+    assert markup.strip_marks(hard.target_md) == "Von den Mühlen"

@@ -177,6 +177,24 @@ Kraken, Pandoc, Typst. Endgültige Auswahl nach Phase 0.
   Rückdeckel ans Ende); Doppelseiten werden am Bundsteg geteilt.
 - Fortschritt als blätterbare Vorschau fertig übersetzter Seiten (Übersetzung / Original / nebeneinander).
 
+## 12e. Layouterkennung – Grundsätze (ergänzt 2026-10-17)
+
+1. **Erst Struktur, dann Text:** Bereiche, Kästen, Tabellen, Spalten und Reihenfolge stehen fest, bevor gelesen wird.
+2. **Mehrere Signale:** Layoutmodell (Farbbild) + Bildverarbeitung in voller Auflösung (Linien jeder Art,
+   Farbflächen, Rahmen, Spaltenlücken) + Regeln; kein Signal entscheidet allein.
+3. **Gestaltung ist Information:** Hintergrund, Rahmen, Schriftfarbe, Fett/Kursiv/Sperrung werden erfasst und
+   wiedergegeben; Kästen sind eigene Textflüsse.
+4. **Texterkennung an den Block angepasst:** Umrechnung hinterlegter Flächen (auch helle Schrift auf dunklem
+   Grund), Bildvarianten bei schlechter Sicherheit.
+5. **Grafik ist kein Text:** Linien werden vor dem Lesen entfernt; Zeichenfolgen ohne Buchstaben/Ziffern verworfen.
+6. **Nichts erfinden:** Tabellenkopf, Fußnote, Seitenzahl, Randnotiz, Kopfzeile nur mit Beleg.
+7. **Vollständigkeit vor Präzision:** Sicherheitsnetz für Text außerhalb erkannter Bereiche.
+8. **Rücksatz respektiert Blockgrenzen:** Text bleibt in seinem Bereich und seinem Kasten.
+9. **Fehler sichtbar machen:** Prüfbericht mit Ampel je Seite (Datei und Anhang), unlesbare Bereiche werden
+   markiert statt übersetzt; Diagnose ohne Inhalt zur Fehlersuche.
+10. **Messbar:** Testsammlung mit Lösungsblatt (`tests/sammlung.py`) und Messwerkzeug (`tools/layout_messen.py`);
+    Qualitätsschranken als automatische Tests.
+
 ## 12d. Zielhardware des Auftraggebers (2026-10-16)
 
 - Gaming-PC mit **6 GB Grafikspeicher** → eigene Stufe mit Modus „Schnell“ (Gemma 4 E4B) und „Gründlich“

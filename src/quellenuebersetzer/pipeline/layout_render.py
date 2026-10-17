@@ -169,10 +169,16 @@ def erase_text(background: Path, page: LPage, out: Path) -> Path:
             sub = gray[y0:y1, x0:x1]
             if sub.size == 0:
                 continue
-            # Schrift = dunkler als das umgebende Papier; weiche Buchstabenränder großzügig mitnehmen
-            paper = np.percentile(sub, 85)
-            spread = max(12.0, float(paper - np.percentile(sub, 5)) * 0.18)
-            ink = (sub < paper - spread).astype(np.uint8) * 255
+            # Schrift = hebt sich vom Grund ab (dunkel auf Papier, hell auf dunklem Kasten);
+            # weiche Buchstabenränder großzügig mitnehmen
+            if np.median(sub) < 110:
+                ground = np.percentile(sub, 15)
+                spread = max(12.0, float(np.percentile(sub, 95) - ground) * 0.18)
+                ink = (sub > ground + spread).astype(np.uint8) * 255
+            else:
+                paper = np.percentile(sub, 85)
+                spread = max(12.0, float(paper - np.percentile(sub, 5)) * 0.18)
+                ink = (sub < paper - spread).astype(np.uint8) * 255
             k = max(5, int((y1 - y0) * 0.06)) | 1
             ink = cv2.dilate(ink, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
             mask[y0:y1, x0:x1] = np.maximum(mask[y0:y1, x0:x1], ink)
@@ -241,6 +247,20 @@ def _region_typst(r: LRegion, page: LPage, notes: Notes, faksimile: bool, box_px
             f'"{r.align}", {weight}, {style}, {fill}, [{body}])]')
 
 
+def decoration_typst(d: dict, page: LPage) -> str:
+    """Kasten im Neusatz: Hintergrundfarbe und Rahmen wie im Original."""
+    x0, y0, x1, y1 = d["box"]
+    dpi = page.dpi
+    fill = f'rgb("{d["fill"]}")' if d.get("fill") else "none"
+    stroke = "none"
+    if d.get("stroke"):
+        thick = max(0.4, _pt(d.get("stroke_px") or 3, dpi))
+        stroke = f'(paint: rgb("{d["stroke"]}"), thickness: {thick:.2f}pt, dash: "{d.get("dash") or "solid"}")'
+    return (f"#place(top + left, dx: {_pt(x0, dpi):.2f}pt, dy: {_pt(y0, dpi):.2f}pt)"
+            f"[#rect(width: {_pt(x1 - x0, dpi):.2f}pt, height: {_pt(y1 - y0, dpi):.2f}pt, fill: {fill}, "
+            f"stroke: {stroke})]")
+
+
 def build_typst(doc: LayoutDocument, faksimile: bool, translated: bool, handwriting: bool, title: str,
                 appendix: bool = True) -> str:
     notes = Notes()
@@ -258,8 +278,10 @@ def build_typst(doc: LayoutDocument, faksimile: bool, translated: bool, handwrit
                 name = page.background
             bg = f', background: image("{name}", width: 100%, height: 100%)'
         parts.append(f"#page(width: {w_pt:.2f}pt, height: {h_pt:.2f}pt, margin: 0pt{bg})[")
+        if not faksimile:
+            parts.extend(decoration_typst(d, page) for d in page.decorations)
         if translated or not faksimile:
-            boxes = expand_boxes(page.regions, page.height_px)
+            boxes = expand_boxes(page.regions, page.height_px, decorations=page.decorations)
             for r in page.regions:
                 if not translated:
                     r = LRegion(**{**r.__dict__, "target_md": r.source_md})
@@ -278,6 +300,18 @@ def build_typst(doc: LayoutDocument, faksimile: bool, translated: bool, handwrit
         parts.append(f'#block(fill: rgb("#fbe9e6"), stroke: 0.8pt + rgb("#b3402f"), inset: 8pt, radius: 3pt)'
                      f'[#strong[{_tstr("Warnhinweis Handschrift: ")}]{_tstr(HANDWRITING_WARNING)}]')
     parts.append(f'#block(fill: rgb("#f6f1e7"), stroke: 0.8pt + rgb("#b9ae98"), inset: 8pt, radius: 3pt)[{_tstr(GENERAL_DISCLAIMER)}]')
+    if translated:
+        from quellenuebersetzer.pipeline import pruefbericht
+
+        rows = [(n, l, i) for n, l, i in pruefbericht.summary(doc) if i]
+        if rows:
+            parts.append(f"#heading(level: 2)[{_tstr('Prüfbericht')}]")
+            parts.append(_tstr("Seiten mit Auffälligkeiten (rot = Fehler, gelb = prüfen). Alle übrigen Seiten "
+                               "ohne Hinweise.") + "\n")
+            for name, l, issues in rows:
+                col = "#b3402f" if l == "rot" else "#b38600"
+                parts.append(f'#block[#text(fill: rgb("{col}"))[#strong[{_tstr(f"S. {name} ({l})")}]]]')
+                parts.extend(f"- {_tstr(i)}" for i in issues)
     if notes.shortened:
         parts.append(f"#heading(level: 2)[{_tstr('Vollständiger Text gekürzter Bereiche')}]")
         parts.append(_tstr("Diese Bereiche passten auch bei engem Satz nicht vollständig auf ihre Seite "
@@ -374,6 +408,12 @@ def layout_preview(doc: LayoutDocument, page: LPage, out_dir: Path) -> Path:
         font = ImageFont.truetype(str(fonts / "segoeui.ttf"), 13)
     except OSError:
         font = ImageFont.load_default()
+    for dec in page.decorations:  # erkannte Kästen (eigene Textflüsse)
+        x0, y0, x1, y1 = (int(v * scale) for v in dec["box"])
+        d.rectangle([x0 - 3, y0 - 3, x1 + 3, y1 + 3], outline=(150, 60, 150, 255), width=3)
+        tw = d.textlength("Kasten", font=font)
+        d.rectangle([x1 - tw - 6, y1 + 3, x1 + 3, y1 + 18], fill=(150, 60, 150, 230))
+        d.text((x1 - tw - 3, y1 + 3), "Kasten", fill=(255, 255, 255), font=font)
     for n, r in enumerate(page.regions, start=1):
         color = LAYOUT_COLORS.get(r.kind, (59, 91, 169))
         x0, y0, x1, y1 = (int(v * scale) for v in r.box)

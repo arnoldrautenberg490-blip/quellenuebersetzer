@@ -39,6 +39,7 @@ class Region:
     box: tuple[int, int, int, int]  # x0, y0, x1, y1 in Pixeln des Seitenbildes
     score: float
     order: int
+    container: str = ""  # Kasten, in dem der Bereich liegt (eigener Textfluss)
 
     @property
     def is_text(self) -> bool:
@@ -112,6 +113,16 @@ class LayoutDetector:
 
     def detect(self, image: np.ndarray) -> list[Region]:
         """``image``: Graustufen- oder RGB-Seitenbild. Ergebnis nach Lesereihenfolge sortiert."""
+        regions = self.detect_raw(image)
+        h, w = image.shape[:2]
+        return reading_order(resolve_overlaps(merge_lines(regions)), w, h)
+
+    def detect_raw(self, image: np.ndarray) -> list[Region]:
+        """Rohbereiche des Modells (nur Doppelungen entfernt) – die Zusammenführung macht ``structure``.
+
+        ``image`` sollte das Farbbild (RGB) sein: das Modell ist auf Farbseiten trainiert, farbige Kästen
+        und Rubriken sind in Graustufen kaum noch zu unterscheiden.
+        """
         rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB) if image.ndim == 2 else image
         h, w = rgb.shape[:2]
         x = cv2.resize(rgb, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_CUBIC)
@@ -144,9 +155,7 @@ class LayoutDetector:
             if any(_iou(region.box, r.box) > 0.8 for r in regions):
                 continue
             regions.append(region)
-        regions = merge_lines(regions)
-        regions = resolve_overlaps(regions)
-        return reading_order(regions, w, h)
+        return regions
 
 
 # --------------------------------------------------------------------------- Nachbearbeitung
@@ -221,7 +230,7 @@ def merge_lines(regions: list[Region]) -> list[Region]:
         merged = False
         if r.kind == "absatz":
             for o in out:
-                if o.kind != "absatz":
+                if o.kind != "absatz" or o.container != r.container:
                     continue
                 line_h = min(r.box[3] - r.box[1], o.box[3] - o.box[1])
                 gap = r.box[1] - o.box[3]
@@ -232,7 +241,7 @@ def merge_lines(regions: list[Region]) -> list[Region]:
                     merged = True
                     break
         if not merged:
-            out.append(Region(r.kind, r.box, r.score, r.order))
+            out.append(Region(r.kind, r.box, r.score, r.order, r.container))
     return out
 
 

@@ -282,7 +282,16 @@ def build_docx(doc: LayoutDocument, out: Path, faksimile: bool = True, translate
                                                     _px_to_pt(page.height_px, page.dpi), pic_id, behind=True)))
         if faksimile and not translated:
             continue
-        boxes = expand_boxes(page.regions, page.height_px)
+        if not faksimile:
+            for dec in page.decorations:
+                png = panel_png(dec, page, work)
+                r_id, _ = d.part.get_or_add_image(str(png))
+                pic_id += 1
+                x0, y0, x1, y1 = dec["box"]
+                anchor_p.append(parse_xml(_anchor_image(
+                    r_id, _px_to_pt(x0, page.dpi), _px_to_pt(y0, page.dpi), _px_to_pt(x1 - x0, page.dpi),
+                    _px_to_pt(y1 - y0, page.dpi), pic_id, behind=True)))
+        boxes = expand_boxes(page.regions, page.height_px, decorations=page.decorations)
         for r in page.regions:
             pic_id = _add_region(d, anchor_p, r, page, notes, style_ids, faksimile, translated, pic_id, work,
                                  boxes.get(r.id))
@@ -299,6 +308,19 @@ def build_docx(doc: LayoutDocument, out: Path, faksimile: bool = True, translate
         p.add_run(HANDWRITING_WARNING)
     p = d.add_paragraph(style="Hinweis") if "Hinweis" in [s.name for s in d.styles] else d.add_paragraph()
     p.add_run(GENERAL_DISCLAIMER)
+    if translated:
+        from quellenuebersetzer.pipeline import pruefbericht
+
+        rows = [(n, l, i) for n, l, i in pruefbericht.summary(doc) if i]
+        if rows:
+            d.add_heading("Prüfbericht", level=2)
+            d.add_paragraph("Seiten mit Auffälligkeiten (rot = Fehler, gelb = prüfen). Alle übrigen Seiten ohne "
+                            "Hinweise.")
+            for name, l, issues in rows:
+                p = d.add_paragraph()
+                p.add_run(f"S. {name} ({l})").bold = True
+                for issue in issues:
+                    d.add_paragraph(f"– {issue}")
     if notes.shortened:
         d.add_heading("Vollständiger Text gekürzter Bereiche", level=2)
         d.add_paragraph("Diese Bereiche passten auch bei engem Satz nicht vollständig auf ihre Seite und sind dort "
@@ -314,6 +336,36 @@ def build_docx(doc: LayoutDocument, out: Path, faksimile: bool = True, translate
             d.add_paragraph(f"S. {page_label}, Anm. {n}: {text}")
     out.parent.mkdir(parents=True, exist_ok=True)
     d.save(str(out))
+    return out
+
+
+def panel_png(dec: dict, page: LPage, work: Path) -> Path:
+    """Kasten (Hintergrundfarbe, Rahmen) als Bild – liegt im Word-Neusatz hinter den Textrahmen."""
+    from PIL import Image, ImageDraw
+
+    out = work / f"kasten-{page.number:04d}-{dec['id']}.png"
+    if out.exists():
+        return out
+    x0, y0, x1, y1 = dec["box"]
+    scale = 0.5
+    w, h = max(4, int((x1 - x0) * scale)), max(4, int((y1 - y0) * scale))
+    img = Image.new("RGBA", (w, h), dec.get("fill") or (0, 0, 0, 0))
+    if dec.get("stroke"):
+        dr = ImageDraw.Draw(img)
+        t = max(1, int((dec.get("stroke_px") or 3) * scale))
+        dash, gap = {"dashed": (8, 5), "dotted": (2, 4)}.get(dec.get("dash") or "", (0, 0))
+        for (ax, ay, bx, by) in ((0, 0, w, 0), (0, h - t, w, h - t), (0, 0, 0, h), (w - t, 0, w - t, h)):
+            horizontal = ay == by
+            length = (bx - ax) if horizontal else (by - ay)
+            pos = 0
+            while pos < length:
+                end = length if not dash else min(length, pos + dash)
+                if horizontal:
+                    dr.rectangle([ax + pos, ay, ax + end, ay + t - 1], fill=dec["stroke"])
+                else:
+                    dr.rectangle([ax, ay + pos, ax + t - 1, ay + end], fill=dec["stroke"])
+                pos = end + gap if dash else length
+    img.save(out)
     return out
 
 

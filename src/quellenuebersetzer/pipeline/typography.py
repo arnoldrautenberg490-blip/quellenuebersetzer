@@ -32,19 +32,25 @@ def ink_color(color_crop: np.ndarray, ink: np.ndarray) -> str:
     pixels = color_crop[ink.astype(bool)]
     hsv = cv2.cvtColor(pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
     sat, val = np.median(hsv[:, 1]), np.median(hsv[:, 2])
+    b, g, r = (int(v) for v in np.median(pixels, axis=0))
+    if val > 170 and sat < 70:
+        return f"#{r:02x}{g:02x}{b:02x}"  # helle Schrift (auf dunklem Grund)
     if sat < 70 or val < 50:
         return ""  # schwarz, grau oder braun-schwarz: normale Schrift
-    b, g, r = (int(v) for v in np.median(pixels, axis=0))
     # etwas abdunkeln: Druckfarbe wirkt auf dem Scan meist heller als im Satz
     r, g, b = (int(c * 0.85) for c in (r, g, b))
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def stroke_ratio(ink: np.ndarray, line_px: float) -> float:
+    """Mittlere Strichbreite (2 × Fläche / Umriss) im Verhältnis zur Zeilenhöhe – stufenlos, auch bei dünner Schrift."""
     if ink.sum() < 30 or line_px <= 0:
         return 0.0
-    dt = cv2.distanceTransform(ink, cv2.DIST_L2, 3)
-    return float(2 * np.median(dt[dt > 0])) / line_px  # typische (halbe) Strichbreite
+    contours, _ = cv2.findContours(ink.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    perimeter = sum(cv2.arcLength(c, True) for c in contours)
+    if perimeter <= 0:
+        return 0.0
+    return float(2 * ink.astype(bool).sum() / perimeter) / line_px
 
 
 def slant(ink: np.ndarray) -> float:
@@ -88,7 +94,7 @@ def measure(color_crop: np.ndarray, binary_crop: np.ndarray, line_px: float) -> 
     )
 
 
-def bold_flags(strokes: list[float], factor: float = 1.3) -> list[bool]:
+def bold_flags(strokes: list[float], factor: float = 1.12) -> list[bool]:
     """Fett = deutlich kräftigere Striche als der übliche Text derselben Seite."""
     base = [s for s in strokes if s > 0]
     if len(base) < 2:

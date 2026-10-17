@@ -77,6 +77,7 @@ class Plan:
     disk_needed_bytes: int = 0
     mode: str = "schnell"
     main_model: str = ""
+    draft_model: str = ""  # „gestaffelt gründlich“: schnelles Modell für den ersten Durchgang
     tier_count: int = 5
 
     @property
@@ -127,11 +128,16 @@ def build_plan(profile: Profile, info: SystemInfo, catalog: Catalog, manifest: M
     warnings: list[str] = []
 
     main_model, quality = tier.main, tier.quality
+    draft_model = ""
     if not tier.gruendlich:
         mode = "schnell"
     elif mode == "gruendlich":
         if info.ram_gb + 0.5 >= tier.gruendlich.get("min_ram_gb", 16):
             main_model, quality = tier.gruendlich["main"], tier.gruendlich.get("quality", quality)
+            # Gestaffelt: das schnelle Modell übersetzt alles, das große nur die schwierigen Abschnitte
+            draft_model = tier.main
+            notes.append("Modus „Gründlich“ arbeitet gestaffelt: Das schnelle Modell übersetzt alles, das große "
+                         "überarbeitet die schwierigen Abschnitte (Tabellen, unsichere Lesungen, markierte Begriffe).")
             if info.ram_gb < 24:
                 notes.append("Modus „Gründlich“: Das Sprachmodell wird zwischen Grafikkarte und Arbeitsspeicher "
                              "aufgeteilt. Bitte während der Verarbeitung keine großen Programme (Spiele, viele "
@@ -199,7 +205,7 @@ def build_plan(profile: Profile, info: SystemInfo, catalog: Catalog, manifest: M
             else:
                 notes.append(f"Wörterbuch „{d.label}“ wird in einer späteren Version nachgeliefert.")
 
-    for tag in dict.fromkeys((main_model, tier.ocr)):
+    for tag in dict.fromkeys(t for t in (main_model, draft_model, tier.ocr) if t):
         m = catalog.models[tag]
         items.append(PlanItem("model", tag, m.label, m.size, m.license, manifest.has("model", tag)))
 
@@ -249,6 +255,7 @@ def build_plan(profile: Profile, info: SystemInfo, catalog: Catalog, manifest: M
         disk_needed_bytes=disk,
         mode=mode,
         main_model=main_model,
+        draft_model=draft_model,
         tier_count=len(catalog.tiers),
     )
 

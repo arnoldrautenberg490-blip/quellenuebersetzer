@@ -20,6 +20,7 @@ from quellenuebersetzer.pipeline.lexicon import Glossary, Lexicon, LexEntry
 from quellenuebersetzer.runtime.ollama import OllamaClient, OllamaError
 
 NO_EVIDENCE = "Einschätzung des Sprachmodells, ohne Wörterbuchbeleg"
+EXAMPLE_EXPLANATION = ("königlicher Amtsträger, der einen Burgbezirk (starostwo) verwaltete und dort Gericht hielt")
 
 _SCHEMA = {
     "type": "object",
@@ -63,6 +64,7 @@ class Segment:
 class TranslationStats:
     segments: int = 0
     retries: int = 0
+    repairs: int = 0  # ohne neue Anfrage behobene Antworten
     fallbacks: int = 0
     b1: int = 0
     b2: int = 0
@@ -167,11 +169,14 @@ Rules:
    - "evidence": the dictionary excerpt you relied on, or empty if you rely on your own knowledge.
    - Dictionary excerpts are background information, NOT a list of words to mark.
 6. Binding glossary entries must be used exactly.
+   Markers <split_1/>, <split_2/> … separate consecutive passages of the page layout (paragraph, column or page
+   boundaries – a sentence may continue across a marker). Keep every marker exactly once, in the same order, at the
+   corresponding position of the translation.
 7. Modern German standard orthography. All explanations in "terms" are written in German.
 {('Language notes:' + chr(10) + hints) if hints else ''}
 Example – source: "Starosta zatwierdził przywilej dla miasta Krakowa."
 Answer: {{"translation": "Der <b2_1>Starost</b2_1> bestätigte das Privileg für die Stadt Krakau.", "readings": [],
-"terms": [{{"id": "b2_1", "original": "starosta", "then": "", "now": "", "explanation": "königlicher Amtsträger, der einen Burgbezirk (starostwo) verwaltete und dort Gericht hielt", "evidence": "Wiktionary: historisch"}}]}}
+"terms": [{{"id": "b2_1", "original": "starosta", "then": "", "now": "", "explanation": "{EXAMPLE_EXPLANATION}", "evidence": "Wiktionary: historisch"}}]}}
 
 Answer only with JSON matching the schema."""
 
@@ -189,10 +194,6 @@ Answer only with JSON matching the schema."""
         if a_marks:
             listed = "\n".join(f"- {k}: " + " | ".join(v.attrs.get("lesarten", v.text).split("|")) for k, v in a_marks.items())
             parts.append("Uncertain readings (alternatives to translate in \"readings\"):\n" + listed)
-        if "<split_1/>" in tagged.text:
-            parts.append("The markers <split_1/>, <split_2/> … separate consecutive passages of the page layout "
-                         "(paragraph, column or page boundaries – a sentence may continue across a marker). Keep every "
-                         "marker exactly once, in the same order, at the corresponding position of the translation.")
         kind = {"tabelle": "an HTML table", "ueberschrift": "a heading", "randnotiz": "a marginal note",
                 "zelle": "the content of one table cell (see context)"}.get(seg.kind, "a passage")
         parts.append(f"Translate {kind}:\n{tagged.text}")
@@ -276,6 +277,11 @@ Answer only with JSON matching the schema."""
                 problems = self._validate(seg, tagged, data)
             except (ValueError, OllamaError) as exc:
                 data, problems = None, [f"Invalid answer: {exc}"]
+            if problems and data is not None:
+                repaired = local_repair(seg, tagged, data, problems)
+                if repaired is not None and not self._validate(seg, tagged, repaired):
+                    data, problems = repaired, []
+                    self.stats.repairs += 1
             if not problems:
                 break
             self.stats.retries += 1
@@ -286,9 +292,9 @@ Answer only with JSON matching the schema."""
                 ]
         if problems:
             return self._fallback(seg, tagged, previous, problems)
-        return self._assemble(seg, tagged, data, bool(lex))
+        return self._assemble(seg, tagged, data)
 
-    def _assemble(self, seg: Segment, tagged: markup.Tagged, data: dict, had_lexicon: bool) -> str:
+    def _assemble(self, seg: Segment, tagged: markup.Tagged, data: dict) -> str:
         html = seg.kind == "tabelle"
         text = data["translation"]
         marks = dict(tagged.marks)
@@ -298,6 +304,7 @@ Answer only with JSON matching the schema."""
                 de = [t for t in readings.get(tid, []) if isinstance(t, str)]
                 mark.attrs = {**mark.attrs, "lesarten_de": "|".join(de)}
         terms = {t.get("id"): t for t in data.get("terms", []) if isinstance(t, dict)}
+        seen_explanations: set[str] = set()
         for tid in markup.tag_ids(text):
             if tid.startswith(("b1_", "b2_")):
                 t = terms.get(tid)
@@ -305,7 +312,12 @@ Answer only with JSON matching the schema."""
                     continue  # Tag ohne Erklärung → wird beim Zurückwandeln entfernt
                 cat = tid.split("_")[0]
                 evidence = (t.get("evidence") or "").strip() or NO_EVIDENCE
-                attrs = {"original": t.get("original", ""), "erkl": t.get("explanation", ""), "beleg": evidence}
+                explanation = (t.get("explanation") or "").strip()
+                # aus dem Beispiel kopiert oder für einen anderen Begriff schon verwendet → keine echte Erläuterung
+                if explanation == EXAMPLE_EXPLANATION or explanation.lower() in seen_explanations:
+                    continue  # Markierung wird beim Zurückwandeln entfernt (Text bleibt)
+                seen_explanations.add(explanation.lower())
+                attrs = {"original": t.get("original", ""), "erkl": explanation, "beleg": evidence}
                 if cat == "b1":
                     attrs.update({"damals": t.get("then", ""), "heute": t.get("now", "")})
                     self.stats.b1 += 1
@@ -382,6 +394,30 @@ Answer only with JSON matching the schema."""
 
 
 _STRAY_TAG_RE = re.compile(r"</?(?:a|b1|b2)(?:_[^>]*)?>")
+
+
+def _drop_tags(text: str, ids: set[str]) -> str:
+    """Markierungs-Tags entfernen, Inhalt behalten."""
+    for tid in ids:
+        text = re.sub(rf"</?{re.escape(tid)}>", "", text)
+    return text
+
+
+def local_repair(seg: Segment, tagged: markup.Tagged, data: dict, problems: list[str]) -> dict | None:
+    """Kleine Fehler ohne neue Modellanfrage beheben: überzählige, fehlerhafte oder unerklärte B-Markierungen
+    werden entfernt (der übersetzte Text bleibt unverändert). Gibt None zurück, wenn das nicht reicht."""
+    repairable = ("Far too many words are marked", "Every marked term needs", "Malformed tags")
+    if not problems or not all(p.startswith(repairable) for p in problems):
+        return None
+    text = data.get("translation", "")
+    text = re.sub(r"</?(?:b1|b2)(?!_\d+>)[^>]*>", "", text)  # fehlerhafte B-Tags
+    terms = {t.get("id") for t in data.get("terms", []) if isinstance(t, dict)}
+    b_ids = [i for i in dict.fromkeys(markup.tag_ids(text)) if i.startswith(("b1_", "b2_"))]
+    text = _drop_tags(text, {i for i in b_ids if i not in terms})
+    n_words = len(re.findall(r"\w+", markup.strip_marks(seg.source)))
+    keep = [i for i in b_ids if i in terms][:max(1, min(2, n_words // 12))]
+    text = _drop_tags(text, {i for i in b_ids if i not in keep})
+    return {**data, "translation": text}
 
 
 def _strip_stray_tags(text: str) -> str:

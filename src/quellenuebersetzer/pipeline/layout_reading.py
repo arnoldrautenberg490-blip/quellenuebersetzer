@@ -1,43 +1,53 @@
 """Lesen für die Layoutkopie: Seitenaufbau erkennen, jeden Bereich mit dem passenden Werkzeug lesen.
 
-Nutzt die Durchgänge des ``PageReader`` (Tesseract → GLM-OCR → Gemma-Schiedsrichter), aber pro Bereich.
+Phase 1 (Struktur, ganzes Dokument zuerst):
+  Merkmalsebenen in voller Auflösung und Farbe (``features``) + Layoutmodell auf dem Farbbild →
+  Entscheidung mit Regeln (``structure``): Kästen als eigene Textflüsse, Linienraster als Tabellen,
+  Spalten an echten Lücken geteilt.
+
+Phase 2 (Text je Bereich):
+  - Linien werden vor der Texterkennung aus dem Bild entfernt (Grafik ist kein Text).
+  - Hinterlegte Kästen werden auf „dunkle Schrift auf hellem Grund“ umgerechnet (auch helle Schrift
+    auf dunklem Grund); bei schlechter Lesesicherheit wird eine zweite Bildvariante versucht.
+  - Zeichenfolgen ohne Buchstaben/Ziffern („----“, „....“, „|“) werden verworfen.
+  - Strukturelemente nur mit Beleg: Fußnote mit Verweiszeichen oder Trennlinie, Seitenzahl nur, wenn sie
+    wie eine aussieht, Tabellenkopf nur bei Fettdruck, Hinterlegung oder kräftigerer Linie.
+  - Unlesbare Bereiche werden markiert und gemeldet, statt Zeichenmüll zu übersetzen.
 Text, der in keinem erkannten Bereich liegt, wird über Tesseract aufgefangen (nichts geht verloren).
 """
 
 from __future__ import annotations
 
+import re
 import statistics
 from pathlib import Path
 
 import cv2
 import numpy as np
-
-from quellenuebersetzer.pipeline import fusion
-from quellenuebersetzer.pipeline.document import PageImage
 from PIL import Image
 
+from quellenuebersetzer.pipeline import features as feat_mod
+from quellenuebersetzer.pipeline import fusion, structure
+from quellenuebersetzer.pipeline.document import PageImage
 from quellenuebersetzer.pipeline.layout_doc import IMAGE_KINDS, LPage, LRegion
-from quellenuebersetzer.pipeline.pagegeom import fit_to, normalize_geometry
-from quellenuebersetzer.pipeline.markup import mark_reading
-from quellenuebersetzer.pipeline.preprocess import (
-    binarize,
-    crop,
-    enhance,
-    estimate_skew,
-    load_gray,
-    save_png,
-)
-from quellenuebersetzer.pipeline.reading import Item, PageReader, PageWork, _char_width, parse_table_output, segment_lines
-from quellenuebersetzer.pipeline.tables import detect_ruled_tables, table_from_words
+from quellenuebersetzer.pipeline.markup import mark_illegible, mark_reading
 from quellenuebersetzer.pipeline.markup import strip_marks as markup_plain
-from quellenuebersetzer.pipeline.typography import bold_flags
+from quellenuebersetzer.pipeline.markup import unescape_md
+from quellenuebersetzer.pipeline.pagegeom import fit_to, normalize_geometry
+from quellenuebersetzer.pipeline.preprocess import binarize, crop, enhance, save_png
+from quellenuebersetzer.pipeline.reading import Item, PageReader, PageWork, _char_width, segment_lines
+from quellenuebersetzer.pipeline.tables import Table, table_from_rules, table_from_words
+from quellenuebersetzer.pipeline.typography import bold_flags, stroke_ratio
 from quellenuebersetzer.pipeline.typography import measure as measure_style
 from quellenuebersetzer.profile import SourceKind
-from quellenuebersetzer.runtime.layout import LayoutDetector, Region
-from quellenuebersetzer.runtime.ollama import OllamaError
-from quellenuebersetzer.runtime.tesseract import Line, OcrPage
+from quellenuebersetzer.runtime.layout import LayoutDetector
+from quellenuebersetzer.runtime.tesseract import Line, OcrPage, Word
 
 SINGLE_LINE_KINDS = {"kopfzeile", "fusszeile", "seitenzahl", "titel"}
+KEEP_SYMBOLS = {"-", "–", "—", "§", "&", "%", "*", "†", "‡", "¶", "/"}
+FOOTNOTE_MARK_RE = re.compile(r"^\s*(?:\\?\*+|†|‡|[¹²³⁴⁵⁶⁷⁸⁹⁰]+|\d{1,3}[\).]?|[a-z]\))(?:\s|$)")
+PAGE_NUMBER_RE = re.compile(r"^[\s\[\(–—-]*(?:s\.|str\.|p\.)?\s*(?:\d{1,4}|[ivxlcdm]{1,7})[\s\]\)–—-]*$", re.I)
+VOWELS = set("aeiouyąęóáéíúàèìòùâêîôûäöüæœAEIOUYĄĘÓÁÉÍÚÀÈÌÒÙÂÊÎÔÛÄÖÜÆŒ")
 
 
 class LayoutWork(PageWork):
@@ -47,14 +57,57 @@ class LayoutWork(PageWork):
         self.region_items: dict[str, list[Item]] = {}
         self.region_tables: dict[str, tuple] = {}
         self.gridless: dict[str, bytes] = {}
+        self.feats: feat_mod.PageFeatures | None = None
+        self.color: np.ndarray | None = None
+        self.binary: np.ndarray | None = None
+        self.enhanced: np.ndarray | None = None
 
 
 def _offset_line(line: Line, dx: int, dy: int) -> Line:
-    from quellenuebersetzer.runtime.tesseract import Word
-
     words = [Word(w.text, w.conf, (w.bbox[0] + dx, w.bbox[1] + dy, w.bbox[2] + dx, w.bbox[3] + dy)) for w in line.words]
     x0, y0, x1, y1 = line.bbox
     return Line(words, (x0 + dx, y0 + dy, x1 + dx, y1 + dy), line.block, line.par)
+
+
+def is_artifact(token: str) -> bool:
+    """Zeichenfolge ohne Buchstaben und Ziffern, die aus Linien, Punkten oder Schmuck entsteht."""
+    t = token.strip()
+    return bool(t) and not re.search(r"\w", t) and t not in KEEP_SYMBOLS
+
+
+def clean_line(line: Line) -> Line | None:
+    words = [w for w in line.words if not is_artifact(w.text)]
+    if not words:
+        return None
+    bbox = (min(w.bbox[0] for w in words), min(w.bbox[1] for w in words),
+            max(w.bbox[2] for w in words), max(w.bbox[3] for w in words))
+    return Line(words, bbox, line.block, line.par)
+
+
+def _ocr_score(lines: list[Line]) -> float:
+    """Summe der Sicherheit echter Wörter – bevorzugt Varianten mit mehr *und* sichereren Wörtern."""
+    return sum(w.conf for ln in lines for w in ln.words if re.search(r"\w", w.text))
+
+
+def _mean_conf(lines: list[Line]) -> float:
+    confs = [w.conf for ln in lines for w in ln.words if re.search(r"\w", w.text)]
+    return float(statistics.mean(confs)) if confs else -1.0
+
+
+def garbage_ratio(text: str) -> float:
+    """Anteil der Zeichenfolgen, die keine Wörter sein können (keine Vokale, Ziffern-Buchstaben-Gemisch …)."""
+    tokens = [t for t in re.split(r"\s+", text) if re.search(r"\w", t)]
+    if not tokens:
+        return 0.0
+    bad = 0
+    for t in tokens:
+        core = re.sub(r"[^\w]", "", t)
+        if not core or core.isdigit() or re.fullmatch(r"[ivxlcdmIVXLCDM]+", core):
+            continue
+        letters = re.sub(r"[\d_]", "", core)
+        if (len(core) >= 3 and not (set(core) & VOWELS)) or (letters and re.search(r"\d", core) and len(core) > 3):
+            bad += 1
+    return bad / len(tokens)
 
 
 def _alignment(lines: list[Line], box: tuple[int, int, int, int]) -> str:
@@ -76,6 +129,23 @@ def _alignment(lines: list[Line], box: tuple[int, int, int, int]) -> str:
     if flush_right > 0.7:
         return "right"
     return "left"
+
+
+def _hex_lab(hexcolor: str) -> np.ndarray:
+    r, g, b = (int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
+    return cv2.cvtColor(np.uint8([[[b, g, r]]]), cv2.COLOR_BGR2LAB).astype(np.float32)[0, 0]
+
+
+def normalize_panel(color: np.ndarray, fill_hex: str) -> np.ndarray:
+    """Hinterlegte Fläche → Graubild mit dunkler Schrift auf hellem Grund (Abstand zur Hintergrundfarbe).
+
+    Funktioniert gleich für helle Schrift auf dunklem Grund, farbige Schrift auf farbigem Grund und
+    dunkle Schrift auf hellem Kasten.
+    """
+    lab = cv2.cvtColor(color, cv2.COLOR_BGR2LAB).astype(np.float32)
+    d = np.linalg.norm(lab - _hex_lab(fill_hex), axis=2)
+    top = max(30.0, float(np.percentile(d, 99)))
+    return (255 - np.clip(d / top * 255, 0, 255)).astype(np.uint8)
 
 
 class LayoutReader(PageReader):
@@ -113,10 +183,17 @@ class LayoutReader(PageReader):
         gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
         lpage = LPage(page.number, w, h, page.dpi, bg_name, label=page.label)
-        regions: list[Region] = self.detector.detect(gray) if self.detector.available else []
+        if not self.detector.available:
+            return lpage
+        # Stufe A: Merkmale (volle Auflösung, Farbe) und Modell auf dem Farbbild
+        feats = feat_mod.analyse(color)
+        raw = self.detector.detect_raw(cv2.cvtColor(color, cv2.COLOR_BGR2RGB))
+        # Stufe B: Entscheidung aus allen Signalen
+        regions, decorations = structure.build(raw, feats, feat_mod.text_ink(gray, feats))
+        lpage.decorations = decorations
         for i, reg in enumerate(regions):
             rid = f"s{page.number}b{i + 1}"
-            lr = LRegion(rid, reg.kind, reg.box, reg.order)
+            lr = LRegion(rid, reg.kind, tuple(int(v) for v in reg.box), i, container=reg.container)
             if reg.kind in IMAGE_KINDS:
                 name = f"abbildung-{rid}.png"
                 save_png(crop(color, reg.box, pad=0), self.workdir / name)
@@ -132,8 +209,19 @@ class LayoutReader(PageReader):
         color = cv2.imdecode(data, cv2.IMREAD_COLOR)
         gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
         work.color = color
+        feats = feat_mod.analyse(color)
+        work.feats = feats
         enhanced = enhance(gray)
+        # hinterlegte Kästen: in dunkle Schrift auf hellem Grund umrechnen (je Kasten, nicht seitenweit)
+        for d in lpage.decorations:
+            if not d.get("fill"):
+                continue
+            x0, y0, x1, y1 = d["box"]
+            enhanced[y0:y1, x0:x1] = enhance(normalize_panel(color[y0:y1, x0:x1], d["fill"]))
         binary = binarize(enhanced)
+        if feats.line_mask is not None:
+            binary[feats.line_mask > 0] = 255  # Linien sind Grafik, kein Text
+        work.binary, work.enhanced = binary, enhanced
         h, w = gray.shape
         covered = np.zeros_like(binary, dtype=bool)
         for lr in lpage.regions:
@@ -142,35 +230,65 @@ class LayoutReader(PageReader):
             if lr.kind in IMAGE_KINDS:
                 continue
             if lr.kind == "tabelle":
-                self._analyse_table(work, lr, gray, enhanced, binary)
+                self._analyse_table(work, lr, enhanced, binary)
             else:
                 self._analyse_text(work, lr, enhanced, binary)
 
-        # Sicherheitsnetz: Text außerhalb aller erkannten Bereiche
+        # Sicherheitsnetz: Text außerhalb aller erkannten Bereiche (ohne Linien und Schmuck)
         if self.tesseract and self.kind != SourceKind.HANDSCHRIFT:
             masked = binary.copy()
             masked[covered] = 255
-            rest = self.tesseract.run_tsv(masked, self.langs, psm=3)
-            groups: dict[tuple[int, int], list[Line]] = {}
-            for ln in rest.lines:
-                if ln.text.strip() and len(ln.text.strip()) > 1:
-                    groups.setdefault((ln.block, ln.par), []).append(ln)
-            for g in groups.values():
-                bx = (min(l.bbox[0] for l in g), min(l.bbox[1] for l in g), max(l.bbox[2] for l in g), max(l.bbox[3] for l in g))
-                center = (bx[0] + bx[2]) / 2
-                kind = "randnotiz" if center < w * 0.15 or center > w * 0.85 else "absatz"
-                rid = f"s{lpage.number}b{len(lpage.regions) + 1}"
-                lr = LRegion(rid, kind, bx, len(lpage.regions))
-                lpage.regions.append(lr)
-                items = [Item(crop(enhanced, l.bbox, pad=8), line=l, bbox=l.bbox, group=(0, 0),
-                              need_second=self.strict or l.min_conf < fusion.CONF_SECOND) for l in g]
-                work.region_items[rid] = items
-                lr.line_px = statistics.median(l.height for l in g)
-                lr.lines = len(g)
-                lr.erase_boxes = [l.bbox for l in g]
+            if (masked < 128).sum() > 150:  # schon zwei kurze Randzeilen zählen
+                rest = self.tesseract.run_tsv(masked, self.langs, psm=3)
+                groups: dict[tuple[int, int], list[Line]] = {}
+                for ln in rest.lines:
+                    ln = clean_line(ln)
+                    if ln and len(re.sub(r"\W", "", ln.text)) > 1 and _mean_conf([ln]) >= 40:
+                        groups.setdefault((ln.block, ln.par), []).append(ln)
+                caught = 0
+                for g in groups.values():
+                    bx = (min(l.bbox[0] for l in g), min(l.bbox[1] for l in g), max(l.bbox[2] for l in g),
+                          max(l.bbox[3] for l in g))
+                    center = ((bx[0] + bx[2]) / 2, (bx[1] + bx[3]) / 2)
+                    container = next((d["id"] for d in lpage.decorations
+                                      if d["box"][0] <= center[0] <= d["box"][2]
+                                      and d["box"][1] <= center[1] <= d["box"][3]), "")
+                    at_margin = center[0] < w * 0.15 or center[0] > w * 0.85
+                    kind = "randnotiz" if at_margin and not container and _mean_conf(g) >= 60 else "absatz"
+                    rid = f"s{lpage.number}b{len(lpage.regions) + 1}"
+                    lr = LRegion(rid, kind, bx, len(lpage.regions), container=container)
+                    lpage.regions.append(lr)
+                    items = [Item(crop(enhanced, l.bbox, pad=8), line=l, bbox=l.bbox, group=(0, 0),
+                                  need_second=self.strict or l.min_conf < fusion.CONF_SECOND) for l in g]
+                    work.region_items[rid] = items
+                    lr.line_px = statistics.median(l.height for l in g)
+                    lr.lines = len(g)
+                    lr.erase_boxes = [l.bbox for l in g]
+                    lr.conf = _mean_conf(g)
+                    caught += 1
+                if caught:
+                    lpage.issues.append(f"{caught} Textstelle(n) lagen außerhalb der erkannten Bereiche "
+                                        "und wurden nachträglich aufgenommen – Lesereihenfolge prüfen.")
         work.items = [it for its in work.region_items.values() for it in its]
         work.tables = [(t, cells) for t, cells in work.region_tables.values()]
         return work
+
+    def _ocr_region(self, box, binary, enhanced, psm: int, line_mask: np.ndarray | None = None) -> list[Line]:
+        """Bereich lesen; bei schwacher Sicherheit zweite Bildvariante (Otsu) versuchen, bessere behalten."""
+        x0, y0, x1, y1 = box
+        dx, dy = max(0, x0 - 6), max(0, y0 - 6)
+        sub = crop(binary, box, pad=6)
+        lines = [clean_line(_offset_line(ln, dx, dy)) for ln in self.tesseract.run_tsv(sub, self.langs, psm=psm).lines]
+        lines = [ln for ln in lines if ln]
+        if _mean_conf(lines) >= 70 or sub.size == 0:
+            return lines
+        alt_src = crop(enhanced, box, pad=6)
+        _t, alt = cv2.threshold(alt_src, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        if line_mask is not None:
+            alt[crop(line_mask, box, pad=6) > 0] = 255  # entfernte Linien bleiben entfernt
+        lines2 = [clean_line(_offset_line(ln, dx, dy)) for ln in self.tesseract.run_tsv(alt, self.langs, psm=psm).lines]
+        lines2 = [ln for ln in lines2 if ln]
+        return lines2 if _ocr_score(lines2) > _ocr_score(lines) * 1.05 else lines
 
     def _analyse_text(self, work: LayoutWork, lr: LRegion, enhanced, binary) -> None:
         x0, y0, x1, y1 = lr.box
@@ -185,56 +303,54 @@ class LayoutReader(PageReader):
             if work.thumb is None:
                 work.thumb = cv2.resize(enhanced, None, fx=0.35, fy=0.35, interpolation=cv2.INTER_AREA)
             return
-        sub = crop(binary, lr.box, pad=6)
         psm = 7 if lr.kind in SINGLE_LINE_KINDS and (y1 - y0) < 140 else 6
-        ocr = self.tesseract.run_tsv(sub, self.langs, psm=psm) if self.tesseract else OcrPage()
-        dx, dy = max(0, x0 - 6), max(0, y0 - 6)
-        lines = [_offset_line(ln, dx, dy) for ln in ocr.lines]
+        mask = work.feats.line_mask if work.feats else None
+        lines = self._ocr_region(lr.box, binary, enhanced, psm, mask) if self.tesseract else []
         items = [Item(crop(enhanced, ln.bbox, pad=8), line=ln, bbox=ln.bbox, group=(0, 0),
                       need_second=self.strict or ln.min_conf < fusion.CONF_SECOND) for ln in lines]
-        if not lines:
-            # nichts erkannt: ganzen Bereich vom Lesemodell lesen lassen
+        if not lines and (crop(binary, lr.box, pad=0) < 128).mean() > 0.01:
+            # nichts erkannt, aber Schrift vorhanden: ganzen Bereich vom Lesemodell lesen lassen
             items = [Item(crop(enhanced, lr.box, pad=4), bbox=lr.box, need_second=True, group=(0, 0))]
         work.region_items[lr.id] = items
         lr.lines = len(lines)
+        lr.conf = _mean_conf(lines)
         lr.line_px = statistics.median(ln.height for ln in lines) if lines else (y1 - y0) * 0.8
         lr.align = _alignment(lines, lr.box)
         lr.bold = lr.kind in ("titel", "ueberschrift")
         lr.erase_boxes = [ln.bbox for ln in lines] or [lr.box]
-        if lines and getattr(work, "color", None) is not None:
+        if lines and work.color is not None:
             style = measure_style(crop(work.color, lr.box, pad=0), crop(binary, lr.box, pad=0), lr.line_px)
             lr.color, lr.italic, lr.spaced, lr.stroke = style.color, style.italic, style.spaced, style.stroke
 
-    def _analyse_table(self, work: LayoutWork, lr: LRegion, gray, enhanced, binary) -> None:
+    # ------------------------------------------------------------------ Tabellen
+    def _analyse_table(self, work: LayoutWork, lr: LRegion, enhanced, binary) -> None:
         x0, y0, x1, y1 = lr.box
-        tables = detect_ruled_tables(crop(gray, lr.box, pad=0), min_cells=2)
-        if tables:
-            t = tables[0]
+        scale = work.lpage.width_px / 2480.0
+        rules = work.feats.rules_in(lr.box, margin=int(14 * scale) + 4) if work.feats else []
+        t = table_from_rules(lr.box, rules, tol=max(6, int(14 * scale)))
+        mask = work.feats.line_mask if work.feats else None
+        if t:
             cells_items = []
             for cell in t.cells:
-                cx0, cy0, cx1, cy1 = cell.bbox
-                cell.bbox = (cx0 + x0, cy0 + y0, cx1 + x0, cy1 + y0)
                 inner = (cell.bbox[0] + 4, cell.bbox[1] + 4, cell.bbox[2] - 4, cell.bbox[3] - 4)
                 if inner[2] <= inner[0] or inner[3] <= inner[1]:
                     continue
                 c_bin = crop(binary, inner, pad=0)
                 if c_bin.size == 0 or (c_bin < 128).mean() < 0.003:
                     continue
-                ocr = self.tesseract.run_tsv(c_bin, self.langs, psm=6) if self.tesseract else OcrPage()
-                words = [wd for ln in ocr.lines for wd in ln.words]
+                single = (inner[3] - inner[1]) < max(60, 2.2 * self._line_h(c_bin))
+                lines = self._ocr_region(inner, binary, enhanced, 7 if single else 6, mask) if self.tesseract else []
+                words = [wd for ln in lines for wd in ln.words]
                 line = Line(words, inner, 0, 0) if words else None
                 need = line is None or self.strict or line.min_conf < fusion.CONF_SECOND or (
                     any(ch.isdigit() for ch in line.text) and line.min_conf < fusion.CONF_OK)
-                cells_items.append(Item(crop(enhanced, inner, pad=0), line=line, need_second=need, bbox=inner, cell=cell))
+                cells_items.append(Item(crop(enhanced, inner, pad=0), line=line, need_second=need, bbox=inner,
+                                        cell=cell))
                 lr.erase_boxes.append(inner)
             work.region_tables[lr.id] = (t, cells_items)
         else:
-            # Tabelle ohne Linien: aus Tesseract-Wortpositionen aufbauen (nichts wird „erfunden“);
-            # das Lesemodell liest höchstens einzelne unsichere Zellen gegen.
-            sub = crop(binary, lr.box, pad=6)
-            ocr = self.tesseract.run_tsv(sub, self.langs, psm=6) if self.tesseract else OcrPage()
-            dx, dy = max(0, x0 - 6), max(0, y0 - 6)
-            lines = [_offset_line(ln, dx, dy) for ln in ocr.lines]
+            # Tabelle ohne (senkrechte) Linien: aus Tesseract-Wortpositionen aufbauen – nichts wird „erfunden“
+            lines = self._ocr_region(lr.box, binary, enhanced, 6, mask) if self.tesseract else []
             built = table_from_words(lines)
             if built is None:
                 # keine Tabellenstruktur erkennbar → als normaler Text lesen (statt Inhalte zu raten)
@@ -253,7 +369,64 @@ class LayoutReader(PageReader):
                                         bbox=cell.bbox, cell=cell))
             lr.erase_boxes = [ln.bbox for ln in lines] or [lr.box]
             work.region_tables[lr.id] = (t, cells_items)
+            lr.conf = _mean_conf(lines)
+        row_boxes: dict[int, tuple[int, int, int, int]] = {}  # ganze Tabellenzeilen (Vereinigung der Zellen)
+        for c in t.cells:
+            if c.bbox and c.rowspan == 1:
+                b = row_boxes.get(c.row)
+                row_boxes[c.row] = c.bbox if b is None else (min(b[0], c.bbox[0]), min(b[1], c.bbox[1]),
+                                                              max(b[2], c.bbox[2]), max(b[3], c.bbox[3]))
+        if self._header_evidence(work, t, row_boxes, rules):
+            for c in t.cells:
+                c.header = c.row == 0
         lr.line_px = 0.0
+
+    @staticmethod
+    def _line_h(binary_crop: np.ndarray) -> float:
+        rows = (binary_crop < 128).any(axis=1)
+        return float(rows.sum()) or 30.0
+
+    def _header_evidence(self, work: LayoutWork, t: Table, row_boxes: dict, rules) -> bool:
+        """Kopfzeile nur mit Beleg: fett, hinterlegt oder durch eine kräftigere Linie abgesetzt."""
+        if t.n_rows < 2 or 0 not in row_boxes or work.color is None:
+            return False
+        first = row_boxes[0]
+        rest = [b for r, b in row_boxes.items() if r > 0]
+        if not rest:
+            return False
+        # 1. kräftigere Linie unter der ersten Zeile
+        hs = [r for r in rules if r.orient == "h"]
+        boundary = (first[3] + min(b[1] for b in rest)) / 2
+        tol = max(12, (min(b[1] for b in rest) - first[3]))
+        under = [r for r in hs if abs(r.pos - boundary) <= tol]
+        others = [r for r in hs if r not in under and first[1] - 4 < r.pos]
+        if under:
+            base = statistics.median([r.thickness for r in others]) if others else 0
+            if not others or max(r.thickness for r in under) >= 1.6 * base:
+                return True
+        # 2. Hinterlegung
+        def bg(box):
+            sub = crop(work.color, box, pad=0)
+            ink = crop(work.binary, box, pad=0) < 128
+            px = sub[~ink] if sub.size else np.empty((0, 3))
+            return np.median(px.reshape(-1, 3), axis=0) if len(px) else None
+
+        b0 = bg(first)
+        brest = [bg(b) for b in rest[:4]]
+        brest = [b for b in brest if b is not None]
+        if b0 is not None and brest:
+            lab0 = cv2.cvtColor(np.uint8([[b0]]), cv2.COLOR_BGR2LAB).astype(np.float32)[0, 0]
+            labr = cv2.cvtColor(np.uint8([[np.median(brest, axis=0)]]), cv2.COLOR_BGR2LAB).astype(np.float32)[0, 0]
+            if np.linalg.norm(lab0 - labr) > 8:
+                return True
+        # 3. Fettdruck
+        def stroke(box):
+            ink = (crop(work.binary, box, pad=0) < 128).astype(np.uint8)
+            return stroke_ratio(ink, 40.0)
+
+        s0 = stroke(first)
+        srest = [s for s in (stroke(b) for b in rest) if s > 0]
+        return bool(s0 and srest and s0 > 1.1 * statistics.median(srest) and s0 > 1.05 * max(srest))
 
     # ------------------------------------------------------------------ 4. Zusammenführen je Bereich
     def _compose(self, w: LayoutWork):
@@ -263,6 +436,7 @@ class LayoutReader(PageReader):
                 it.cell.markdown = it.markdown
             region = next(r for r in w.lpage.regions if r.id == rid)
             region.source_md = table.to_html()
+            region.issues.extend(table.plausibility())
         for region in w.lpage.regions:
             items = w.region_items.get(region.id)
             if items is None:
@@ -279,6 +453,10 @@ class LayoutReader(PageReader):
             region.source_md = fusion.join_lines(lines_md)
         w.lpage.regions = [r for r in w.lpage.regions
                            if r.kind in IMAGE_KINDS or r.source_md.strip() or r.kind == "tabelle"]
+        if self.kind != SourceKind.HANDSCHRIFT:
+            for r in w.lpage.regions:
+                self._check_structure(w, r)
+                self._quality_gate(r)
         # fett = deutlich kräftiger als der übliche Text dieser Seite (z. B. fette Zwischenüberschriften)
         # nur Bereiche mit genug Text vergleichen (Seitenzahlen o. ä. geben kein verlässliches Strichbild)
         texts = [r for r in w.lpage.regions if r.is_text and len(markup_plain(r.source_md)) >= 8]
@@ -286,9 +464,34 @@ class LayoutReader(PageReader):
             r.bold = r.bold or is_bold
         return w.lpage
 
-    def _compose_hw_region(self, items: list[Item]) -> str:
-        from quellenuebersetzer.runtime.tesseract import Word
+    def _check_structure(self, w: LayoutWork, r: LRegion) -> None:
+        """Strukturelemente nur mit Beleg – sonst als gewöhnlicher Text behandeln."""
+        text = unescape_md(markup_plain(r.source_md)).strip()
+        if r.kind == "fussnote":
+            rule_above = any(
+                ru.orient == "h" and r.box[1] - 3 * max(20.0, r.line_px) <= ru.pos <= r.box[1] + 4
+                and ru.x1 > r.box[0] and ru.x0 < r.box[2]
+                for ru in (w.feats.rules if w.feats else []))
+            if not (FOOTNOTE_MARK_RE.match(text) or rule_above):
+                r.kind = "absatz"
+        elif r.kind == "seitenzahl" and not PAGE_NUMBER_RE.match(text):
+            r.kind = "fusszeile" if r.box[1] > w.lpage.height_px * 0.85 else (
+                "kopfzeile" if r.box[3] < w.lpage.height_px * 0.15 else "absatz")
 
+    def _quality_gate(self, r: LRegion) -> None:
+        """Unlesbares wird markiert und gemeldet, statt als Zeichenmüll übersetzt zu werden."""
+        if r.kind in IMAGE_KINDS or r.kind == "tabelle" or not r.source_md.strip():
+            return
+        text = unescape_md(markup_plain(r.source_md))
+        ratio = garbage_ratio(text)
+        n = len(text.split())
+        if (n >= 3 and ratio > 0.5) or (0 <= r.conf < 35 and n >= 3):
+            r.issues.append(f"Bereich unlesbar (Lesesicherheit {max(0, r.conf):.0f} %) – nicht übersetzt.")
+            r.source_md = mark_illegible()
+        elif 0 <= r.conf < fusion.CONF_LOW or ratio > 0.2:
+            r.issues.append(f"Geringe Lesesicherheit ({max(0, r.conf):.0f} %) – Text prüfen.")
+
+    def _compose_hw_region(self, items: list[Item]) -> str:
         out = []
         for it in items:
             if it.first is None:
@@ -310,6 +513,8 @@ class LayoutReader(PageReader):
             self._pass_handwriting_first(works)
         self._pass_glm(works)
         out = [self._compose(w) for w in works]
+        for w in works:  # große Bildspeicher freigeben (Buchmodus)
+            w.color = w.binary = w.enhanced = w.feats = None
         for lp in out:
             lp.read = True
         return out
@@ -319,4 +524,4 @@ class LayoutReader(PageReader):
         return self.read_regions([self.detect_page(p) for p in pages])
 
 
-__all__ = ["LayoutReader", "_char_width"]
+__all__ = ["LayoutReader", "_char_width", "garbage_ratio", "is_artifact"]

@@ -22,6 +22,7 @@ from quellenuebersetzer.pipeline.document import Block, SourceDocument
 from quellenuebersetzer.pipeline.export import FORMATS, DocMeta, Exporter, ExportError, build_document
 from quellenuebersetzer.pipeline.layout_doc import LayoutDocument
 from quellenuebersetzer.pipeline.layout_reading import LayoutReader
+from quellenuebersetzer.pipeline import pruefbericht
 from quellenuebersetzer.pipeline.layout_translate import translate_layout
 from quellenuebersetzer.pipeline.pagegeom import common_size
 from quellenuebersetzer.pipeline.lexicon import Glossary, Lexicon
@@ -328,9 +329,9 @@ class Job:
                 shutil.rmtree(job_cache, ignore_errors=True)  # Seitenbilder sofort entfernen (Datenschutz)
 
     # ------------------------------------------------------------------ Seitengetreu
-    def _translator(self, lexicon: Lexicon, glossary: Glossary, step) -> Translator:
+    def _translator(self, lexicon: Lexicon, glossary: Glossary, step, model: str = "") -> Translator:
         return Translator(
-            self.client, self.settings.main_model, self.lang.name_en, self.period, self.profile.year_range(),
+            self.client, model or self.settings.main_model, self.lang.name_en, self.period, self.profile.year_range(),
             lexicon=lexicon if lexicon.available else None, glossary=glossary, periods=self.profile.periods,
             extra_hints=self.lang.prompt.get("historische_hinweise", []), status=lambda m: step(m),
         )
@@ -428,7 +429,13 @@ class Job:
                 self._save_correction(preview, reviewed)
             ldoc.save(state)
 
-        translator = self._translator(lexicon, glossary, step)
+        staged = self.settings.mode == "gruendlich" and bool(self.settings.draft_model)             and self.settings.draft_model != self.settings.main_model
+        if staged:
+            # gestaffelt gründlich: schnelles Modell für alles, großes Modell nur für schwierige Abschnitte
+            translator = self._translator(lexicon, glossary, step, self.settings.draft_model)
+            refiner = self._translator(lexicon, glossary, step, self.settings.main_model)
+        else:
+            translator, refiner = self._translator(lexicon, glossary, step), None
         step("Phase 3 von 3 – Übersetzung beginnt", 0.5)
 
         def progress(i: int, n: int) -> None:
@@ -458,16 +465,28 @@ class Job:
                             outputs=[original, translated]))
 
         t_tr = time.time()
-        translate_layout(ldoc, translator, progress=progress, on_page_done=page_done)
+        translate_layout(ldoc, translator, progress=progress, on_page_done=page_done, refine=refiner)
         self.phase_times["uebersetzen"] = time.time() - t_tr
         self.phase_times["bereiche"] = sum(1 for p in ldoc.pages for r in p.regions if r.translatable)
-        self.phase_times["wiederholungen"] = translator.stats.retries
+        self.phase_times["wiederholungen"] = translator.stats.retries + (refiner.stats.retries if refiner else 0)
+        self.phase_times["reparaturen"] = translator.stats.repairs + (refiner.stats.repairs if refiner else 0)
+        if refiner:
+            self.phase_times["ueberarbeitet"] = refiner.stats.segments
+        pruefbericht.check_translation(ldoc)
         ldoc.save(state)
         if translator.stats.fallbacks:
             self.emit(Event("hinweis", f"{translator.stats.fallbacks} Bereich(e) mit vereinfachter Übersetzung "
                                        "– im Dokument gekennzeichnet.", src.name, index, total))
         step("Seiten werden gesetzt", 0.92)
         outputs = self._write_layout_outputs(src, ldoc, kind)
+        rows = pruefbericht.summary(ldoc)
+        red = [name for name, l, _ in rows if l == "rot"]
+        yellow = [name for name, l, _ in rows if l == "gelb"]
+        if red or yellow:
+            text = f"Prüfbericht: {len(red)} Seite(n) mit Fehlern, {len(yellow)} zu prüfen"
+            if red:
+                text += f" (Fehler auf S. {', '.join(red[:8])}{' …' if len(red) > 8 else ''})"
+            self.emit(Event("hinweis", text + " – Einzelheiten in der Datei „Prüfbericht“.", src.name, index, total))
         self.emit(Event("fertig", "Fertig", src.name, index, total, 1.0, outputs))
         marks = sum(len(markup.find_marks(r.source_md)) for p in ldoc.pages for r in p.regions)
         return FileResult(src, True, outputs, marks, 0)
@@ -488,6 +507,9 @@ class Job:
             img_dir.mkdir(exist_ok=True)
             for name in images:
                 shutil.copy2(work / name, img_dir / name)
+        outputs.append(pruefbericht.write_report(ldoc, out_dir / f"{src.stem} – Prüfbericht.txt", src.stem))
+        # Diagnose ohne Inhalt (nur Rahmen, Arten, Sicherheit) – darf zur Fehlersuche weitergegeben werden
+        pruefbericht.write_diagnose(ldoc, out_dir / f"{src.stem} – Diagnose ohne Inhalt.json")
         exporter = Exporter(self.paths)
         for label, translated in (("Umschrift", False), ("Übersetzung", True)):
             flow = build_document(ldoc.flow_markdown(translated=translated), meta, translated=translated)
@@ -577,7 +599,10 @@ class Job:
                              f"= {pt.get('lesen', 0) / pt['seiten']:.0f} s/Seite")
             if pt.get("bereiche"):
                 lines.append(f"  Übersetzen: {pt.get('uebersetzen', 0):.0f} s für {pt['bereiche']} Bereiche, "
-                             f"{pt.get('wiederholungen', 0)} zweite Versuche")
+                             f"{pt.get('wiederholungen', 0)} zweite Versuche, "
+                             f"{pt.get('reparaturen', 0)} ohne Neuanfrage repariert"
+                             + (f", {pt['ueberarbeitet']} Abschnitte vom großen Modell überarbeitet"
+                                if pt.get("ueberarbeitet") is not None else ""))
             for model, st in self.client.stats.items():
                 tok_in = st["eingabe"] / st["eingabe_s"] if st["eingabe_s"] else 0
                 tok_out = st["ausgabe"] / st["ausgabe_s"] if st["ausgabe_s"] else 0
@@ -594,7 +619,7 @@ class Job:
         return langs + [l for l in self.lang.tesseract.get("zusatz", []) if l != "osd" and l not in langs]
 
     def _models(self) -> list[str]:
-        return [m for m in dict.fromkeys([self.settings.ocr_model, self.settings.main_model]) if m]
+        return [m for m in dict.fromkeys([self.settings.ocr_model, self.settings.draft_model, self.settings.main_model]) if m]
 
     def _write_outputs(self, src: Path, doc: SourceDocument, original_md: str, german_md: str) -> list[Path]:
         out_dir = output_dir_for(src, self.options, self.paths)

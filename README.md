@@ -44,9 +44,15 @@ Markierungen: **A** Lesung unsicher (orange) · **B1** Bedeutungswandel (blau) �
 
 ### Seitengetreue Ausgabe (Standard)
 
-- **Seitenaufbau-Erkennung** (PP-DocLayoutV3, Apache-2.0, lokal über ONNX Runtime): Absätze, Spalten, Titel,
-  Tabellen, Abbildungen, Bildunterschriften, Randnotizen, Fußnoten, Kopf-/Fußzeilen, Seitenzahlen samt
-  Lesereihenfolge (zusätzlich XY-Cut). Text außerhalb erkannter Bereiche fängt ein Tesseract-Sicherheitsnetz auf.
+- **Seitenaufbau-Erkennung in zwei Stufen:** (A) Merkmale in voller Auflösung und Farbe – Linien jeder Art
+  (auch gestrichelt, gepunktet, blass), Kästen mit Hintergrundfarbe und Rahmen, Spaltenlücken – plus
+  Layoutmodell PP-DocLayoutV3 (Apache-2.0, lokal über ONNX Runtime) auf dem Farbbild; (B) Regeln führen alles
+  zusammen: Kästen als eigene Textflüsse, Linienraster als Tabellen, Spalten an echten Lücken getrennt,
+  Strukturelemente nur mit Beleg. Text außerhalb erkannter Bereiche fängt ein Tesseract-Sicherheitsnetz auf.
+- **Prüfbericht** je Dokument (Datei und Anhang): Ampel je Seite, unlesbare Bereiche (markiert statt übersetzt),
+  geringe Lesesicherheit, Tabellenlücken, Reste der Ausgangssprache. Dazu eine **Diagnose ohne Inhalt**
+  (nur Rahmen, Bereichsarten, Sicherheit), die gefahrlos zur Fehlersuche weitergegeben werden kann.
+- Messbar: Testsammlung mit Lösungsblatt (`tests/sammlung.py`) und `tools/layout_messen.py`.
 - **Faksimile:** Originalseite als Hintergrund, die Schrift wird retuschiert, die Übersetzung steht an derselben
   Stelle. **Neusatz:** gleiche Anordnung auf weißer Seite. Beides als **PDF** (Typst) und **Word** (positionierte
   Rahmen, schwebende Tabellen). Längerer deutscher Text wird durch behutsame Schriftverkleinerung eingepasst.

@@ -39,6 +39,9 @@ class LRegion:
     stroke: float = 0.0  # gemessene Strichstärke (für „fett“ im Vergleich zur Seite)
     image: str = ""  # Bildausschnitt (Abbildungen), Dateiname im Arbeitsordner
     erase_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)  # Textflächen fürs Faksimile
+    container: str = ""  # Kasten (Kennung in ``LPage.decorations``), leer = Seitenfluss
+    conf: float = -1.0  # mittlere Lesesicherheit 0–100 (-1 = unbekannt)
+    issues: list[str] = field(default_factory=list)  # Hinweise für den Prüfbericht
 
     @property
     def is_text(self) -> bool:
@@ -59,6 +62,11 @@ class LPage:
     regions: list[LRegion] = field(default_factory=list)
     label: str = ""  # Seitenbezeichnung, z. B. „7a“ oder „Vorderdeckel“
     read: bool = False  # Texterkennung abgeschlossen (Phase 2)
+    decorations: list[dict] = field(default_factory=list)  # Kästen: id, box, fill, stroke, dash, stroke_px, dark
+    issues: list[str] = field(default_factory=list)  # Hinweise zur ganzen Seite für den Prüfbericht
+
+    def decoration(self, kid: str) -> dict | None:
+        return next((d for d in self.decorations if d.get("id") == kid), None)
 
     @property
     def name(self) -> str:

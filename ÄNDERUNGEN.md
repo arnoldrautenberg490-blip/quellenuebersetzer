@@ -85,6 +85,10 @@ Stand: 17.10.2026 · Version 0.1.0 (in Entwicklung, noch nicht veröffentlicht)
 - Bilder hinter dem Text → Überlappungen im Seitenaufbau werden aufgelöst.
 
 ## Nachbesserung nach Durchsicht der Übersetzungen (17.10.2026)
+> **In der Praxis nicht bestätigt:** Mit dem aktuellen Code treten Überlappungen, erfundene bzw.
+> unvollständige Tabellen und verlorene Gestaltung weiterhin auf. Die folgenden Änderungen bestanden nur
+> synthetische Einzeltests; sie werden im Zuge der Layout-Überarbeitung gemessen und nachgebessert.
+
 - **Keine erfundenen Tabelleninhalte mehr:** Tabellen ohne Linien werden aus den Wortpositionen der
   Texterkennung aufgebaut; das Lesemodell liest nur noch einzelne unsichere Zellen gegen (kein „Ablesen“
   ganzer Tabellen mehr). Ohne erkennbare Tabellenstruktur wird der Bereich als Text gelesen.
@@ -98,8 +102,67 @@ Stand: 17.10.2026 · Version 0.1.0 (in Entwicklung, noch nicht veröffentlicht)
 - Gebündelte Übersetzung: jeder Teil muss in der Länge zu seinem Bereich passen, sonst Bereich für Bereich.
 - Akzente über Großbuchstaben (Ü, Ś, Ż) werden nicht mehr abgeschnitten (PDF und Word).
 
+## Überarbeitung der Layouterkennung (17.10.2026)
+Ursachen der Fehler im Code: Das Layoutmodell bekam nur ein Graubild (Farbe ging verloren), die Feinheiten
+gingen bei der Verkleinerung auf 800 × 800 Pixel verloren, das Schwarzweißbild wurde einmal für die ganze Seite
+erzeugt (helle Schrift auf dunklem Grund unlesbar), nur durchgezogene Linien wurden erkannt, die erste
+Tabellenzeile galt immer als Kopf, Randtext wurde nach Lage zur „Randnotiz“, Fehler liefen still durch.
+
+- **Zweistufige Erkennung:** Stufe A erfasst Merkmale in voller Auflösung und Farbe (Linien jeder Art –
+  durchgezogen, gestrichelt, gepunktet, blass, lückenhaft –, Kästen mit Hintergrundfarbe und Rahmen,
+  Spaltenlücken); das Layoutmodell bekommt das Farbbild. Stufe B entscheidet mit Regeln aus allen Signalen.
+- **Kästen** sind eigene Textflüsse: nie mit Umgebungstext vermischt oder gemeinsam übersetzt; Hintergrund und
+  Rahmen erscheinen im Neusatz (PDF und Word); Text bleibt beim Einpassen im Kasten.
+- **Spalten** werden an echten Lücken getrennt; Linienraster werden zu Tabellen, auch wenn das Modell dort Text sieht.
+- **Texterkennung je Block:** hinterlegte Flächen werden umgerechnet (auch helle Schrift auf dunklem Grund),
+  Linien vor dem Lesen entfernt, zweite Bildvariante bei schlechter Sicherheit, Zeichenfolgen ohne
+  Buchstaben/Ziffern verworfen.
+- **Nichts erfinden:** Tabellenkopf nur bei Fettdruck, Hinterlegung oder kräftigerer Linie; Fußnote nur mit
+  Verweiszeichen oder Trennlinie; Seitenzahl nur, wenn sie wie eine aussieht; Randnotiz/Kopfzeile nach Lage zum Haupttext.
+- **Fehler sichtbar:** Prüfbericht mit Ampel je Seite (eigene Datei und Anhang in PDF/Word): unlesbare Bereiche
+  (markiert statt übersetzt), geringe Lesesicherheit, nachträglich aufgefangener Text, Tabellenlücken, Reste der
+  Ausgangssprache. Zusätzlich „Diagnose ohne Inhalt“ (nur Rahmen, Arten, Sicherheit – kein Text, kein Bild).
+- **Testsammlung** (`tests/sammlung.py`, 10 Seitentypen sauber und gealtert, mit Lösungsblatt) und
+  **Messwerkzeug** (`tools/layout_messen.py`). Ergebnis an diesen 20 Seiten:
+
+  | Kennzahl | vorher | nachher |
+  |---|---|---|
+  | Blöcke erkannt | 89,6 % | 100 % |
+  | Wörter wiedergefunden | 95,1 % | 99,9 % |
+  | Artefakte („----“, „....“) | 102 | 0 |
+  | Tabellenraster richtig | 16,7 % | 100 % |
+  | Tabellenzellen richtig | 20,8 % | 99,7 % |
+  | Gestaltung getroffen | 44,4 % | 91,7 % |
+  | Erfundene Strukturen (Kopfzeilen, Randnotizen …) | 1 | 0 |
+  | Vermischte Bereiche / Überlappungen | 0 / 0 | 0 / 0 |
+
+  Einschränkung: Das sind synthetische Seiten. Echte Scans sind schwieriger; als behoben gilt etwas erst nach
+  dem Praxistest (die Diagnose ohne Inhalt hilft dabei).
+
+## Übersetzungsbeschleunigung (17.10.2026)
+- **Kleine Fehler ohne Neuanfrage reparieren:** überzählige, fehlerhafte oder unerklärte Markierungen werden
+  lokal entfernt, statt die ganze Antwort neu erzeugen zu lassen (früher oft zweiter Versuch und Rückfall).
+- **Gleichbleibende Anweisung vorn:** alle festen Regeln (auch zu den Abschnittsmarken) stehen im unveränderlichen
+  Teil, den die Modell-Laufzeit wiederverwendet; die Anfrage selbst ist kürzer.
+- **„Gründlich“ arbeitet gestaffelt:** Das schnelle Modell übersetzt alles, das große überarbeitet nur schwierige
+  Abschnitte (Tabellen, unsichere Lesungen, markierte Begriffe, Abschnitte mit Korrekturen) – ein einziger
+  Modellwechsel. Das schnelle Modell wird dafür mitinstalliert. Fällt der zweite Durchgang aus, bleibt der Entwurf.
+- Kopierte Beispiel-Erläuterungen und doppelte Erläuterungen werden verworfen (nichts Erfundenes als Beleg).
+- Gemessen mit echtem Modell (Gemma 4 E2B, Entwicklungsrechner ohne Grafikkarte, 6 Sätze, alt → neu):
+  245 s → 147 s (−40 %), Antwort-Token 2857 → 1571, zweite Versuche 4 → 0, Rückfälle 2 → 0.
+  Kleine Stichprobe; die Zahlen vom Gaming-PC (Zeitprotokoll) stehen noch aus.
+- **Verworfen nach Messung:** gebündelte Zweitlesung (auf dem Prozessor langsamer: 60 s statt 32 s) und
+  Erläuterungen direkt aus dem Wörterbuch (falsche Wortbedeutungen, nicht deutsch, kein Zeitgewinn).
+
+## Fehlerbehebung: Speicher nach dem Beenden der Modell-Laufzeit (17.10.2026)
+- Beim Beenden blieben die Modellprozesse (`llama-server`) als Waisen zurück und belegten mehrere Gigabyte
+  Arbeitsspeicher – nach einigen Läufen konnte der Speicher volllaufen (Verlangsamung, Abbrüche).
+  Jetzt wird der ganze Prozessbaum beendet; beim Start werden Reste früherer Sitzungen beseitigt
+  (nur programmeigene, am Installationspfad erkannt).
+
 ## Qualitätssicherung
-- 78 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit).
+- 95 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
+  darunter Ende-zu-Ende-Qualitätsschranken der Layouterkennung an schwierigen Seiten der Testsammlung.
 - Tests mit echten Modellen auf dem Entwicklungsrechner (ohne Grafikkarte): Gemma 4 E2B und 12B.
 - Setup.exe mehrfach installiert, gestartet und rückstandslos deinstalliert.
 

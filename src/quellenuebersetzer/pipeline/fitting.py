@@ -111,12 +111,15 @@ def fit_text(md: str, box: tuple[float, float, float, float], base_size: float, 
     return Fit(size, leading, tracking, shortened, True, box)
 
 
-def expand_boxes(regions, page_h_px: float, margin_px: float = 0) -> dict[str, tuple[int, int, int, int]]:
+def expand_boxes(regions, page_h_px: float, margin_px: float = 0,
+                 decorations: list[dict] | None = None) -> dict[str, tuple[int, int, int, int]]:
     """Textbereiche nach unten in freien Raum wachsen lassen – bis zum nächsten Block darunter.
 
+    Kästen (``decorations``) sind Grenzen: Text im Kasten bleibt im Kasten, Text außerhalb wächst nicht hinein.
     Gibt neue Rahmen (Pixel) zurück; Abbildungen und Tabellen bleiben unverändert.
     """
     boxes = {r.id: r.box for r in regions}
+    panels = {d["id"]: tuple(d["box"]) for d in decorations or []}
     out = {}
     for r in regions:
         x0, y0, x1, y1 = r.box
@@ -124,6 +127,12 @@ def expand_boxes(regions, page_h_px: float, margin_px: float = 0) -> dict[str, t
             out[r.id] = r.box
             continue
         limit = page_h_px - margin_px
+        own = panels.get(getattr(r, "container", ""))
+        if own:
+            limit = min(limit, own[3] - max(4, (own[3] - own[1]) * 0.02))
+        for kid, (px0, py0, px1, py1) in panels.items():
+            if kid != getattr(r, "container", "") and py0 >= y1 - 2 and min(x1, px1) > max(x0, px0):
+                limit = min(limit, py0)
         for o in regions:
             if o.id == r.id:
                 continue

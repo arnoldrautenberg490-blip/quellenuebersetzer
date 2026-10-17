@@ -69,6 +69,10 @@ def test_gtx_1660_ti_with_16gb_ram(tmp_path):
     thorough = _plan(tmp_path, info, mode="gruendlich")
     assert thorough.mode == "gruendlich" and thorough.main_model == "gemma4:12b-it-qat"
     assert any("aufgeteilt" in n for n in thorough.notes)
+    # gestaffelt: das schnelle Modell wird für den ersten Durchgang mitinstalliert
+    assert thorough.draft_model == "gemma4:e4b-it-qat"
+    assert {i.id for i in thorough.items if i.kind == "model"} == {"gemma4:12b-it-qat", "gemma4:e4b-it-qat",
+                                                                    "glm-ocr:q8_0"}
     assert thorough.assessments[0].light == Light.GRUEN  # Druck im Modus „Gründlich“
 
 

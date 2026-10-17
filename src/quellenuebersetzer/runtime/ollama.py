@@ -229,6 +229,8 @@ class OllamaService:
             self._stop_leftovers()
         if not self.installed:
             raise OllamaError("Die Modell-Laufzeit ist nicht installiert.")
+        if self.proc is None:
+            self._stop_leftovers()  # verwaiste Modellprozesse einer abgebrochenen Sitzung geben Speicher frei
         self.home.mkdir(parents=True, exist_ok=True)
         self.paths.models.mkdir(parents=True, exist_ok=True)
         self.paths.logs.mkdir(parents=True, exist_ok=True)
@@ -253,14 +255,37 @@ class OllamaService:
         raise OllamaError("Die Modell-Laufzeit startet nicht. Details: logs/ollama.log")
 
     def stop(self) -> None:
+        """Beendet die Laufzeit samt ihren Modellprozessen (``llama-server`` je geladenem Modell).
+
+        Nur den Hauptprozess zu beenden reicht nicht: Die Modellprozesse liefen sonst als Waisen weiter
+        und hielten mehrere Gigabyte Arbeitsspeicher belegt.
+        """
+        import psutil
+
         if self.proc and self.proc.poll() is None:
+            try:
+                children = psutil.Process(self.proc.pid).children(recursive=True)
+            except psutil.Error:
+                children = []
             self.proc.terminate()
+            for child in children:
+                try:
+                    child.terminate()
+                except psutil.Error:
+                    pass
             try:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+            _gone, alive = psutil.wait_procs(children, timeout=10)
+            for child in alive:
+                try:
+                    child.kill()
+                except psutil.Error:
+                    pass
         self.proc = None
         self.mode = None
+        self._stop_leftovers()  # auch Reste früherer Sitzungen (nur programmeigene, am Pfad erkannt)
 
     def _stop_leftovers(self) -> None:
         """Beendet programmeigene Ollama-Prozesse (erkennbar am Pfad), nie fremde Installationen."""

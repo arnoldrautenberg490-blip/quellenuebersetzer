@@ -142,6 +142,7 @@ class MainWindow(QMainWindow):
 
     def _installed(self, plan, show_main: bool = True) -> None:
         self.settings.main_model = plan.main_model
+        self.settings.draft_model = plan.draft_model
         self.settings.ocr_model = plan.tier.ocr
         self.settings.tier = plan.tier.key
         self.settings.mode = plan.mode

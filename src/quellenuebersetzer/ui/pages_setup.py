@@ -184,8 +184,9 @@ class PlanPage(Page):
             for key, title, text in (
                 ("schnell", "Schnell", "Kleineres Sprachmodell, läuft fast ganz auf der Grafikkarte. Ordentliche "
                  "Qualität, gut zum Ausprobieren und für größere Mengen."),
-                ("gruendlich", "Gründlich", "Größeres Sprachmodell, aufgeteilt auf Grafikkarte und Arbeitsspeicher. "
-                 "Deutlich bessere Übersetzung, aber etwa drei- bis viermal langsamer – für Bücher über Nacht."),
+                ("gruendlich", "Gründlich", "Das schnelle Modell übersetzt alles, ein größeres Modell (aufgeteilt auf "
+                 "Grafikkarte und Arbeitsspeicher) überarbeitet die schwierigen Stellen: Tabellen, unsichere "
+                 "Lesungen, Begriffe der Zeit. Bessere Übersetzung, langsamer – gut für Bücher über Nacht."),
             ):
                 rb = QRadioButton(title)
                 rb.setStyleSheet("font-weight: 600;")

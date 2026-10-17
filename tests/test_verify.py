@@ -98,3 +98,27 @@ def test_stored_tier_is_kept_on_startup_check(tmp_path):
     plan = build_plan(Profile([SourceKind.DRUCK], "pl", ["18jh"]), GTX, load_catalog(), Manifest(paths), "gruendlich",
                       "stufe5")
     assert plan.tier.key == "stufe5" and plan.main_model == "gemma4:12b-it-qat"
+
+
+def test_stopping_the_runtime_also_ends_its_model_processes(tmp_path):
+    """Modellprozesse (llama-server) dürfen nach dem Beenden nicht als Waisen Speicher belegen."""
+    import subprocess
+    import sys
+    import time
+
+    import psutil
+
+    from quellenuebersetzer.config import Paths
+    from quellenuebersetzer.runtime.ollama import OllamaService
+
+    svc = OllamaService(Paths(tmp_path))
+    # Stellvertreter: Hauptprozess, der einen langlebigen Kindprozess startet (wie „ollama serve“ → llama-server)
+    code = ("import subprocess,sys,time;"
+            "subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)']);time.sleep(120)")
+    svc.proc = subprocess.Popen([sys.executable, "-c", code])
+    deadline = time.time() + 10
+    while not psutil.Process(svc.proc.pid).children() and time.time() < deadline:
+        time.sleep(0.2)
+    child = psutil.Process(svc.proc.pid).children()[0]
+    svc.stop()
+    assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE

@@ -180,9 +180,70 @@ def _grid_to_table(horiz: np.ndarray, vert: np.ndarray, offset: tuple[int, int])
                 rs += 1
             owner[r:r + rs, c:c + cs] = len(cells)
             cells.append(
-                Cell(r, c, rs, cs, bbox=(ox + xs[c], oy + ys[r], ox + xs[c + cs], oy + ys[r + rs]), header=(r == 0))
+                Cell(r, c, rs, cs, bbox=(ox + xs[c], oy + ys[r], ox + xs[c + cs], oy + ys[r + rs]))
             )
     return Table(n_rows, n_cols, cells, bbox=(ox, oy, ox + w, oy + h))
+
+
+def _cluster(values: list[int], tol: int) -> list[int]:
+    out: list[list[int]] = []
+    for v in sorted(values):
+        if out and v - out[-1][-1] <= tol:
+            out[-1].append(v)
+        else:
+            out.append([v])
+    return [int(sum(g) / len(g)) for g in out]
+
+
+def table_from_rules(box: tuple[int, int, int, int], rules, tol: int = 10) -> Table | None:
+    """Zellraster aus erkannten Linien (``features.Rule``) – auch gestrichelt, gepunktet oder lückenhaft.
+
+    Fehlende Außenlinien werden durch den Tabellenrand ersetzt. Verbundene Zellen entstehen dort, wo
+    eine Trennlinie fehlt. Ohne mindestens zwei Spalten und zwei Zeilen: ``None``.
+    """
+    x0, y0, x1, y1 = box
+    hs = [r for r in rules if r.orient == "h" and r.length > (x1 - x0) * 0.25]
+    vs = [r for r in rules if r.orient == "v" and r.length > (y1 - y0) * 0.25]
+    ys = _cluster([r.pos for r in hs] + [y0, y1], tol)
+    xs = _cluster([r.pos for r in vs] + [x0, x1], tol)
+    if len(ys) < 3 or len(xs) < 3 or not vs:
+        return None
+    n_rows, n_cols = len(ys) - 1, len(xs) - 1
+
+    def covered(rs, pos: int, a: int, b: int) -> bool:
+        if b <= a:
+            return False
+        span = 0
+        for r in rs:
+            if abs(r.pos - pos) > tol:
+                continue
+            lo, hi = (r.x0, r.x1) if r.orient == "h" else (r.y0, r.y1)
+            span += max(0, min(b, hi) - max(a, lo))
+        return span >= 0.6 * (b - a)
+
+    def has_vline(c: int, r0: int, r1: int) -> bool:
+        x = xs[c]
+        return c in (0, n_cols) or covered(vs, x, ys[r0], ys[r1])
+
+    def has_hline(r: int, c0: int, c1: int) -> bool:
+        y = ys[r]
+        return r in (0, n_rows) or covered(hs, y, xs[c0], xs[c1])
+
+    owner = -np.ones((n_rows, n_cols), dtype=int)
+    cells: list[Cell] = []
+    for r in range(n_rows):
+        for c in range(n_cols):
+            if owner[r, c] >= 0:
+                continue
+            cs = 1
+            while c + cs < n_cols and not has_vline(c + cs, r, r + 1) and owner[r, c + cs] < 0:
+                cs += 1
+            rs = 1
+            while r + rs < n_rows and not has_hline(r + rs, c, c + cs) and (owner[r + rs, c:c + cs] < 0).all():
+                rs += 1
+            owner[r:r + rs, c:c + cs] = len(cells)
+            cells.append(Cell(r, c, rs, cs, bbox=(xs[c], ys[r], xs[c + cs], ys[r + rs])))
+    return Table(n_rows, n_cols, cells, bbox=(xs[0], ys[0], xs[-1], ys[-1]))
 
 
 # --------------------------------------------------------------------------- Tabellen ohne Gitterlinien
@@ -251,12 +312,12 @@ def table_from_words(lines, min_rows: int = 2, min_cols: int = 2):
             cell_words[key] = list(p)
             bbox = (min(w.bbox[0] for w in p), min(w.bbox[1] for w in p), max(w.bbox[2] for w in p),
                     max(w.bbox[3] for w in p))
-            cells.append(Cell(r, c0, 1, c1 - c0 + 1, "", bbox=bbox, header=(r == 0)))
+            cells.append(Cell(r, c0, 1, c1 - c0 + 1, "", bbox=bbox))
     # leere Plätze auffüllen, damit das Raster vollständig ist
     occupied = {(c.row, col) for c in cells for col in range(c.col, c.col + c.colspan)}
     for r in range(len(rows)):
         for c in range(len(columns)):
             if (r, c) not in occupied:
-                cells.append(Cell(r, c, 1, 1, "", header=(r == 0)))
+                cells.append(Cell(r, c, 1, 1, ""))
     cells.sort(key=lambda c: (c.row, c.col))
     return Table(len(rows), len(columns), cells), cell_words

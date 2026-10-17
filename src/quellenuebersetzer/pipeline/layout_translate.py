@@ -2,7 +2,8 @@
 
 Weil der Seitenaufbau des gesamten Dokuments vorab feststeht, werden aufeinanderfolgende Absätze
 (auch über Spalten- und Seitengrenzen hinweg) zu zusammenhängenden Abschnitten gebündelt (bis etwa
-``CHUNK_CHARS`` Zeichen). Überschriften, Tabellen und Bildunterschriften beginnen neue Abschnitte;
+``CHUNK_CHARS`` Zeichen) – aber nur innerhalb desselben Textflusses: Kastentext wird nie mit dem
+umgebenden Text gebündelt, ebenso wenig Absätze mit anderer Schriftfarbe oder Fettdruck. Überschriften, Tabellen und Bildunterschriften beginnen neue Abschnitte;
 Kopf-/Fußzeilen, Randnotizen und Fußnoten werden eigenständig übersetzt, ohne den Textfluss zu unterbrechen.
 
 Innerhalb eines Abschnitts trennen Marken ``<split_1/>``, ``<split_2/>`` … die Bereiche; nach der
@@ -37,6 +38,12 @@ def _segment_kind(r: LRegion) -> str:
     return "text"
 
 
+def same_flow(a: LRegion, b: LRegion) -> bool:
+    """Gehören zwei Absätze zum selben Textfluss? Kasten und Seitentext, andere Farbe oder Fettdruck: nein."""
+    return (a.container == b.container and a.color == b.color and a.bold == b.bold
+            and not a.issues and not b.issues)
+
+
 def build_units(regions: list[LRegion], chunk_chars: int = CHUNK_CHARS) -> list[list[LRegion]]:
     """Abschnitte für die Übersetzung: zusammenhängender Fließtext gebündelt, alles andere einzeln."""
     units: list[list[LRegion]] = []
@@ -51,7 +58,7 @@ def build_units(regions: list[LRegion], chunk_chars: int = CHUNK_CHARS) -> list[
 
     for r in regions:
         if r.kind in FLOW_KINDS:
-            if current and size + len(r.source_md) > chunk_chars:
+            if current and (size + len(r.source_md) > chunk_chars or not same_flow(current[-1], r)):
                 flush()
             current.append(r)
             size += len(r.source_md)
@@ -85,10 +92,32 @@ def balanced(unit: list[LRegion], parts: list[str], low: float = 0.45, high: flo
     return True
 
 
+def needs_refinement(unit: list[LRegion], troubled: bool) -> bool:
+    """Schwierige Abschnitte für den zweiten Durchgang mit dem großen Modell („gestaffelt gründlich“):
+    Tabellen, unsichere Lesungen, markierte Begriffe, Abschnitte mit Korrekturen oder Rückfall."""
+    if troubled:
+        return True
+    for r in unit:
+        if r.kind == "tabelle":
+            return True
+        if any(m.category == "a" for _s, _e, m in markup.find_marks(r.source_md)):
+            return True
+        if any(m.category in ("b1", "b2") or m.attrs.get("hinweis") for _s, _e, m in markup.find_marks(r.target_md)):
+            return True
+    return False
+
+
 def translate_layout(doc: LayoutDocument, tr: Translator, progress: Callable[[int, int], None] | None = None,
-                     on_page_done: Callable[[object], None] | None = None) -> None:
+                     on_page_done: Callable[[object], None] | None = None,
+                     refine: Translator | None = None) -> None:
+    """Übersetzt alle Bereiche. Mit ``refine`` (gestaffelt gründlich) übersetzt ``tr`` (schnelles Modell) alles,
+    danach ``refine`` (großes Modell) nur die schwierigen Abschnitte – mit einem einzigen Modellwechsel."""
     regions = [r for p in doc.pages for r in p.regions
                if r.translatable and r.source_md.strip() and not r.target_md]
+    for r in regions:
+        if markup.unescape_md(markup.strip_marks(r.source_md)).strip() == "[unleserlich]":
+            r.target_md = r.source_md  # unlesbarer Bereich: nichts zu übersetzen (steht im Prüfbericht)
+    regions = [r for r in regions if not r.target_md]
     reported: set[int] = set()
 
     def report_finished_pages() -> None:
@@ -104,37 +133,73 @@ def translate_layout(doc: LayoutDocument, tr: Translator, progress: Callable[[in
             else:
                 break  # Seiten in Reihenfolge melden
 
-    report_finished_pages()
-    cache: dict[tuple[str, str], str] = {}
-    previous: tuple[str, str] | None = None
-    units = build_units(regions)
-    for i, unit in enumerate(units, start=1):
-        if progress:
-            progress(i, len(units))
+    def translate_unit(unit: list[LRegion], t: Translator, previous, cache) -> tuple[str, str] | None:
         if len(unit) > 1:
             joined = " ".join(
                 f"{r.source_md.strip()} <split_{k}/>" if k < len(unit) else r.source_md.strip()
                 for k, r in enumerate(unit, start=1)
             )
-            parts = split_parts(tr.translate_segment(Segment("text", joined), previous), len(unit) - 1)
+            parts = split_parts(t.translate_segment(Segment("text", joined), previous), len(unit) - 1)
             if parts and not balanced(unit, parts):
                 parts = None  # Sätze über die Marken verschoben → ein Bereich bekäme zu viel/zu wenig Text
             if parts:
                 for r, part in zip(unit, parts):
                     r.target_md = part
-                previous = (markup.strip_marks(unit[-1].source_md), markup.strip_marks(unit[-1].target_md))
-                report_finished_pages()
-                continue
+                return markup.strip_marks(unit[-1].source_md), markup.strip_marks(unit[-1].target_md)
             # Rückfall: Bereich für Bereich
         for r in unit:
             key = (r.kind, r.source_md)
             if r.kind not in FLOW_KINDS and key in cache:
                 r.target_md = cache[key]
                 continue
-            r.target_md = tr.translate_segment(Segment(_segment_kind(r), r.source_md), previous)
+            r.target_md = t.translate_segment(Segment(_segment_kind(r), r.source_md), previous)
             if r.kind in FLOW_KINDS:
                 previous = (markup.strip_marks(r.source_md), markup.strip_marks(r.target_md))
             else:
                 cache[key] = r.target_md
+        return previous
+
+    report_finished_pages()
+    units = build_units(regions)
+    total = len(units)
+    cache: dict[tuple[str, str], str] = {}
+    previous: tuple[str, str] | None = None
+    troubled: list[bool] = []
+    for i, unit in enumerate(units, start=1):
+        if progress:
+            progress(i, total)
+        before = tr.stats.retries + tr.stats.fallbacks
+        previous = translate_unit(unit, tr, previous, cache)
+        troubled.append(tr.stats.retries + tr.stats.fallbacks > before)
         report_finished_pages()
     report_finished_pages()
+    if refine is None:
+        return
+    # zweiter Durchgang: großes Modell nur für die schwierigen Abschnitte
+    hard = [k for k, unit in enumerate(units) if needs_refinement(unit, troubled[k])]
+    flow_prev = {}
+    last = None
+    for k, unit in enumerate(units):
+        flow_prev[k] = last
+        if unit[-1].kind in FLOW_KINDS and unit[-1].target_md:
+            last = (markup.strip_marks(unit[-1].source_md), markup.strip_marks(unit[-1].target_md))
+    refine_cache: dict[tuple[str, str], str] = {}
+    for n, k in enumerate(hard, start=1):
+        if progress:
+            progress(total + n, total + len(hard))
+        unit = units[k]
+        old = [r.target_md for r in unit]
+        try:
+            translate_unit(unit, refine, flow_prev[k], refine_cache)
+        except Exception:  # noqa: BLE001 – z. B. Speichermangel: der Entwurf des schnellen Modells bleibt erhalten
+            for r, t in zip(unit, old):
+                r.target_md = t
+            refine.stats.problems.append("Zweiter Durchgang fehlgeschlagen – Entwurf beibehalten.")
+            continue
+        for r, t in zip(unit, old):
+            if not r.target_md.strip():
+                r.target_md = t
+        if on_page_done:
+            for p in doc.pages:
+                if any(r in p.regions for r in unit):
+                    on_page_done(p)
