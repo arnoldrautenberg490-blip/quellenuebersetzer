@@ -20,6 +20,7 @@ class FileSpec:
     sha256: str
     size: int
     name: str
+    mirrors: tuple[str, ...] = ()  # Ersatzadressen derselben Datei (gleiche Prüfsumme)
 
 
 @dataclass
@@ -160,7 +161,8 @@ def load_catalog(base: Path | None = None) -> Catalog:
     for name, spec in data["tessdata"].items():
         if name.startswith("_"):
             continue
-        tessdata[name] = FileSpec(url=spec["url"], sha256=spec["sha256"], size=spec["size"], name=f"{name}.traineddata")
+        tessdata[name] = FileSpec(url=spec["url"], sha256=spec["sha256"], size=spec["size"], name=f"{name}.traineddata",
+                                  mirrors=tuple(spec.get("mirrors", ())))
         tess_lic[name] = spec.get("license", "")
 
     models = {tag: Model(tag=tag, **m) for tag, m in data["models"].items()}

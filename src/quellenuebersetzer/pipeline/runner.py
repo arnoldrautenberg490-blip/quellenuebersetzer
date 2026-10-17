@@ -25,7 +25,7 @@ from quellenuebersetzer.pipeline.export import FORMATS, DocMeta, Exporter, Expor
 from quellenuebersetzer.pipeline.layout_doc import LayoutDocument
 from quellenuebersetzer.pipeline.layout_reading import LayoutReader
 from quellenuebersetzer.pipeline import pruefbericht, tempo
-from quellenuebersetzer.pipeline.layout_translate import LayoutTranslator
+from quellenuebersetzer.pipeline.layout_translate import LayoutTranslator, needs_refinement
 from quellenuebersetzer.pipeline.parallel import cpu_workers, pmap
 from quellenuebersetzer.pipeline.pagegeom import common_size
 from quellenuebersetzer.pipeline.lexicon import Glossary, Lexicon
@@ -124,6 +124,49 @@ def _duration(seconds: float) -> str:
     if minutes < 90:
         return f"{minutes} Minuten"
     return f"{minutes / 60:.1f} Stunden".replace(".", ",")
+
+
+REFINE_FACTOR = 3.0  # vorsichtige Annahme: großes Modell braucht je Abschnitt etwa dreimal so lange
+
+
+class Restzeit:
+    """Restzeit aus dem gemessenen Durchsatz DIESES Laufs: Wanduhr (Lesen und Übersetzen zusammen) je
+    übersetztem Bereich mal noch offene Bereiche des ganzen Buchs. Unabhängig vom Fortschrittsbalken –
+    der schnelle Seitenaufbau und beim Fortsetzen schon erledigte Seiten verfälschen die Schätzung nicht."""
+
+    MIN_DONE = 10
+    MIN_SECONDS = 60.0
+
+    def __init__(self, clock: Callable[[], float] = time.time):
+        self.clock = clock
+        self.start: float | None = None
+        self.done0 = 0
+
+    def begin(self, done: int) -> None:
+        self.start, self.done0 = self.clock(), done
+
+    def estimate(self, done: int, remaining: int, extra_units: float = 0.0) -> float | None:
+        """``extra_units``: zusätzliche Arbeit in „Bereichen zum gemessenen Tempo“ (z. B. Überarbeitung)."""
+        if self.start is None:
+            return None
+        n, elapsed = done - self.done0, self.clock() - self.start
+        if n < self.MIN_DONE or elapsed < self.MIN_SECONDS:
+            return None
+        return elapsed / n * (max(0, remaining) + max(0.0, extra_units))
+
+
+def _region_counts(pages) -> tuple[int, int]:
+    """(übersetzte, noch offene) Bereiche; ungelesene Seiten zählen mit allen übersetzbaren Bereichen."""
+    done = remaining = 0
+    for p in pages:
+        for r in p.regions:
+            if not r.translatable:
+                continue
+            if r.target_md:
+                done += 1
+            elif r.source_md.strip() or not p.read:
+                remaining += 1
+    return done, remaining
 
 
 def period_label(profile: Profile) -> str:
@@ -248,11 +291,14 @@ class Job:
         started = time.time()
         self.phase_times = {}
 
-        def step(msg: str, frac: float = 0.0) -> None:
+        def step(msg: str, frac: float = 0.0, rest: float | None | bool = None) -> None:
+            """``rest``: eigene Restzeit in Sekunden, ``False`` = keine anzeigen, ``None`` = aus dem Balken."""
             self._check()
             elapsed = time.time() - started
-            if 0.03 < frac < 0.98 and elapsed > 20:
-                msg += f" · noch etwa {_duration(elapsed * (1 - frac) / frac)}"
+            if rest is None and 0.03 < frac < 0.98 and elapsed > 20:
+                rest = elapsed * (1 - frac) / frac
+            if rest:
+                msg += f" · noch etwa {_duration(rest)}"
             self.emit(Event("schritt", msg, src.name, index, total, frac))
 
         try:
@@ -407,7 +453,7 @@ class Job:
         sizes = []
         for i, size in enumerate(pmap(reader.prepare_page, todo, workers), start=1):
             self._check()
-            step(f"Phase 1 von 3 – Seiten entzerren: {i} von {len(todo)}", 0.04 * i / max(1, len(todo)))
+            step(f"Phase 1 von 3 – Seiten entzerren: {i} von {len(todo)}", 0.04 * i / max(1, len(todo)), False)
             sizes.append(size)
         # … dann ein gemeinsames Normalformat für das ganze Dokument festlegen
         if ldoc.target_size is None and not known:
@@ -425,7 +471,7 @@ class Job:
         for i, lp in enumerate(pmap(lambda pg: reader.detect_page(pg, target_size), todo, workers), start=1):
             self._check()
             step(f"Phase 1 von 3 – Seitenaufbau: Seite {lp.name} ({len(known) + i} von {n_total})",
-                 0.04 + 0.04 * (len(known) + i) / max(1, n_total))
+                 0.04 + 0.04 * (len(known) + i) / max(1, n_total), False)
             ldoc.pages.append(lp)
             ldoc.pages.sort(key=lambda x: x.number)
             if i % 5 == 0 or i == len(todo):
@@ -471,12 +517,31 @@ class Job:
             self.emit(Event("seite_fertig", page.name, src.name, page.number, n_pages,
                             outputs=[original, translated]))
 
+        restzeit = Restzeit()
+        refine_rest = Restzeit()
+
+        def refine_share() -> float:
+            if not staged or not lt.units:
+                return 0.0
+            return sum(needs_refinement(u, t) for u, t in zip(lt.units, lt.troubled)) / len(lt.units)
+
         def tr_progress(label: str, base: float, span: float, where: str = ""):
             def progress(i: int, n: int) -> None:
                 if i % 10 == 0:
                     save()  # Zwischenstand für das Fortsetzen
-                step(f"{label}: Abschnitt {i} von {n}{where}", base + span * i / max(1, n))
+                done, remaining = _region_counts(ldoc.pages)
+                extra = refine_share() * REFINE_FACTOR * (done + remaining)
+                rest = restzeit.estimate(done, remaining, extra)
+                step(f"{label}: Abschnitt {i} von {n}{where}", base + span * i / max(1, n),
+                     rest if rest is not None else False)
             return progress
+
+        def refine_progress(i: int, n: int) -> None:
+            if i == 1:
+                refine_rest.begin(0)
+            rest = refine_rest.estimate(i - 1, n - i + 1)
+            step(f"Überarbeitung schwieriger Abschnitte (großes Modell): Abschnitt {i} von {n}",
+                 0.9 + 0.02 * i / max(1, n), rest if rest is not None else False)
 
         streams = self._translation_streams(translator.model, n_pages, step)
         lt = LayoutTranslator(ldoc, translator, on_page_done=page_done, streams=streams)
@@ -488,6 +553,7 @@ class Job:
                 self._preview_read(ldoc, p, preview_dir, src, index)
         t_read = time.time()
         read_seconds = translate_seconds = 0.0
+        restzeit.begin(_region_counts(ldoc.pages)[0])
 
         if review:
             # ---- Phase 2 komplett, dann Prüfung der Umschrift, dann Phase 3 (Prüfung braucht den ganzen Text)
@@ -496,7 +562,7 @@ class Job:
                 batch = unread[start:start + PAGE_BATCH]
                 done_before = n_total - len(unread) + start
                 step(f"Phase 2 von 3 – Texterkennung: Seiten {batch[0].name}–{batch[-1].name} von {n_total}",
-                     0.08 + 0.42 * done_before / max(1, n_total))
+                     0.08 + 0.42 * done_before / max(1, n_total), False)
                 reader.read_regions(batch)
                 save()
                 for p in batch:
@@ -515,6 +581,7 @@ class Job:
                 self._save_correction(preview, reviewed)
             save()
             t0 = time.time()
+            restzeit.begin(_region_counts(ldoc.pages)[0])  # Wartezeit der Prüfung zählt nicht mit
             lt.translate_pages(ldoc.pages, tr_progress("Phase 3 von 3 – Übersetzung", 0.5, 0.42))
             translate_seconds = time.time() - t0
         else:
@@ -565,8 +632,10 @@ class Job:
                     if isinstance(block, BaseException):
                         raise block
                     self._check()
+                    done, remaining = _region_counts(ldoc.pages)
+                    rest = restzeit.estimate(done, remaining, refine_share() * REFINE_FACTOR * (done + remaining))
                     step(f"Phase 2 von 3 – Zweitlesung: Seiten {block[0].name}–{block[-1].name} von {n_total}",
-                         0.08 + 0.84 * pages_done / max(1, n_total))
+                         0.08 + 0.84 * pages_done / max(1, n_total), rest if rest is not None else False)
                     t = time.time()
                     reader.finish_pages(works)
                     read_seconds += time.time() - t
@@ -596,7 +665,7 @@ class Job:
         if refiner:
             t0 = time.time()
             self.phase_times["ueberarbeitet"] = lt.refine(
-                refiner, tr_progress("Überarbeitung schwieriger Abschnitte (großes Modell)", 0.9, 0.02))
+                refiner, refine_progress)
             translate_seconds += time.time() - t0
         self.phase_times["uebersetzen"] = translate_seconds
         self.phase_times["stroeme"] = streams
@@ -608,7 +677,7 @@ class Job:
         if translator.stats.fallbacks:
             self.emit(Event("hinweis", f"{translator.stats.fallbacks} Bereich(e) mit vereinfachter Übersetzung "
                                        "– im Dokument gekennzeichnet.", src.name, index, total))
-        step("Seiten werden gesetzt", 0.92)
+        step("Seiten werden gesetzt", 0.92, False)
         outputs = self._write_layout_outputs(src, ldoc, kind)
         rows = pruefbericht.summary(ldoc)
         red = [name for name, l, _ in rows if l == "rot"]

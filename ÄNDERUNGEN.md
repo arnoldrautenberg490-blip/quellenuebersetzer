@@ -20,6 +20,8 @@ Stand: 17.10.2026 · Version 0.1.0 (in Entwicklung, noch nicht veröffentlicht)
   Ollama-Verzeichnis), Fehlendes/Beschädigtes/Veraltetes automatisch und ohne Klick ergänzt.
 - Deinstallation mit einem Klick (im Programm und unter „Apps & Features“), Sicherung von Glossar und
   Korrekturen in „Dokumente“; Setup.exe ohne Administratorrechte (Inno Setup).
+- Ersatzadressen für Downloads (gleiche Prüfsumme Pflicht): Fraktur-Modell frak2021 kommt zuerst aus der
+  Veröffentlichung „modelle“ des Projekts, dann vom Server der UB Mannheim (dieser war zeitweise nicht erreichbar).
 
 ## Datenschutz
 - Netzwerksperre im Programmprozess während der Verarbeitung (nur 127.0.0.1).
@@ -57,6 +59,9 @@ Stand: 17.10.2026 · Version 0.1.0 (in Entwicklung, noch nicht veröffentlicht)
 - Prüfung jeder Antwort (Vollständigkeit, Tags, Tabellenstruktur, Länge, keine Klammer-Erklärungen,
   sparsame Markierungen) mit zweitem Versuch; Endreinigung gegen Platzhalter-Reste.
 - Begrenzte Antwortlänge, feste Kontextgröße je Modell (kein Neuladen).
+- Restzeit aus dem gemessenen Tempo des laufenden Durchgangs (Wanduhr je übersetztem Abschnitt × offene
+  Abschnitte des ganzen Buchs, bei „Gründlich“ inklusive Überarbeitung); vorher war sie chronisch zu niedrig
+  (schneller Seitenaufbau und beim Fortsetzen erledigte Seiten verzerrten die Hochrechnung).
 
 ## Ausgabe
 - Seitengetreu als PDF (Typst) und Word (positionierte Rahmen): Faksimile (Original als Hintergrund,
@@ -274,7 +279,7 @@ Modellbereichs blieben unbemerkt. Teilweise überlappende Bilder/Tabellen und da
   (nur programmeigene, am Installationspfad erkannt).
 
 ## Qualitätssicherung
-- 156 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
+- 161 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
   darunter Ende-zu-Ende-Qualitätsschranken der Layouterkennung an schwierigen Seiten der Testsammlung.
 - Tests mit echten Modellen auf dem Entwicklungsrechner (ohne Grafikkarte): Gemma 4 E2B und 12B.
 - Setup.exe mehrfach installiert, gestartet und rückstandslos deinstalliert.

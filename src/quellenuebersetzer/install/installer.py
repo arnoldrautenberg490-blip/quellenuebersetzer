@@ -191,7 +191,8 @@ class Installer:
         tessdir = self.paths.runtime / "tesseract" / "tessdata"
         tessdir.mkdir(parents=True, exist_ok=True)
         dest = tessdir / spec.name
-        download(spec.url, dest, spec.sha256, spec.size, progress=on_bytes, should_cancel=self._should_cancel)
+        download(spec.url, dest, spec.sha256, spec.size, progress=on_bytes, should_cancel=self._should_cancel,
+                 mirrors=spec.mirrors)
         rel = dest.relative_to(self.paths.root).as_posix()
         self.manifest.add(Entry(item.id, "tessdata", spec.sha256, [rel]))
 

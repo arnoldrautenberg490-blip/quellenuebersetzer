@@ -39,8 +39,12 @@ def download(
     progress: ProgressFn | None = None,
     should_cancel: Callable[[], bool] | None = None,
     retries: int = 4,
+    mirrors: tuple[str, ...] | list[str] = (),
 ) -> Path:
-    """Lädt ``url`` nach ``dest``. Bereits vorhandene, korrekte Dateien werden nicht erneut geladen."""
+    """Lädt ``url`` nach ``dest``. Bereits vorhandene, korrekte Dateien werden nicht erneut geladen.
+
+    Ist eine Adresse nicht erreichbar, werden die ``mirrors`` der Reihe nach versucht; angenommen wird nur
+    eine Datei mit der erwarteten Prüfsumme."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     expected = sha256.lower()
 
@@ -54,20 +58,14 @@ def download(
         dest.unlink()
 
     part = dest.with_name(dest.name + ".part")
-    attempt = 0
-    while True:
-        attempt += 1
+    sources = [url, *mirrors]
+    for k, source in enumerate(sources):
         try:
-            _download_once(url, part, size, progress, should_cancel)
+            _fetch_with_retries(source, part, size, progress, should_cancel, retries if k == len(sources) - 1 else 1)
             break
-        except Cancelled:
-            raise
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-            if isinstance(exc, urllib.error.HTTPError) and exc.code == 416:
-                part.unlink(missing_ok=True)  # Teildatei ungültig → von vorn
-            if attempt > retries:
-                raise DownloadError(f"Download fehlgeschlagen: {url} ({exc})") from exc
-            time.sleep(min(30, 2**attempt))
+        except DownloadError:
+            if k == len(sources) - 1:
+                raise
 
     h = hashlib.sha256()
     _hash_file(part, h)
@@ -78,6 +76,23 @@ def download(
         )
     part.replace(dest)
     return dest
+
+
+def _fetch_with_retries(url, part: Path, size, progress, should_cancel, retries: int) -> None:
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            _download_once(url, part, size, progress, should_cancel)
+            return
+        except Cancelled:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            if isinstance(exc, urllib.error.HTTPError) and exc.code == 416:
+                part.unlink(missing_ok=True)  # Teildatei ungültig → von vorn
+            if attempt > retries:
+                raise DownloadError(f"Download fehlgeschlagen: {url} ({exc})") from exc
+            time.sleep(min(30, 2**attempt))
 
 
 def _download_once(url, part: Path, size, progress, should_cancel) -> None:

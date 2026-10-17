@@ -324,3 +324,33 @@ def test_saved_state_of_another_program_version_is_not_reused(tmp_path, tess_roo
     assert second[0].ok
     assert any("aktualisiert" in e.message for e in events2 if e.kind == "hinweis")
     assert not any("fortgesetzt" in e.message for e in events2 if e.kind == "hinweis")
+
+
+# --------------------------------------------------------------------------- Restzeit
+
+
+def test_remaining_time_uses_measured_throughput_not_progress_bar():
+    from quellenuebersetzer.pipeline.runner import Restzeit
+
+    now = [0.0]
+    eta = Restzeit(clock=lambda: now[0])
+    eta.begin(done=1500)  # Fortsetzen: 1500 Bereiche aus einem früheren Lauf zählen nicht als Tempo
+    now[0] = 30.0
+    assert eta.estimate(1520, 900) is None  # zu kurz gemessen → keine Angabe statt einer zu kleinen
+    now[0] = 100.0
+    assert eta.estimate(1505, 900) is None  # zu wenige Abschnitte
+    now[0] = 200.0
+    assert eta.estimate(1540, 880) == pytest.approx(5.0 * 880)  # 40 Bereiche in 200 s → 5 s je Bereich
+    assert eta.estimate(1540, 880, extra_units=120) == pytest.approx(5.0 * 1000)  # Überarbeitung kommt dazu
+
+
+def test_unread_pages_count_fully_as_remaining():
+    from quellenuebersetzer.pipeline.layout_doc import LPage, LRegion
+    from quellenuebersetzer.pipeline.runner import _region_counts
+
+    read = LPage(1, 100, 100, 300, "x", [LRegion("a", "absatz", (0, 0, 9, 9), 0, "Tekst", "Text"),
+                                         LRegion("b", "absatz", (0, 0, 9, 9), 1, "Tekst", ""),
+                                         LRegion("c", "seitenzahl", (0, 0, 9, 9), 2, "3", "")], read=True)
+    unread = LPage(2, 100, 100, 300, "x", [LRegion("d", "absatz", (0, 0, 9, 9), 0, "", ""),
+                                           LRegion("e", "abbildung", (0, 0, 9, 9), 1, "", "")])
+    assert _region_counts([read, unread]) == (1, 2)

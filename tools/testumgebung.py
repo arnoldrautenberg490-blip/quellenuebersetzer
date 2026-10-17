@@ -27,8 +27,12 @@ def main(root: Path) -> None:
         if not manifest.has("component", cid):
             inst._install_component(catalog.components[cid], lambda *_: None)
         print("bereit:", cid)
-    for lang in ("pol", "frak2021", "lat", "deu", "heb", "yid", "rus"):
+    for lang in ("pol", "lat", "deu", "heb", "yid", "rus"):
         inst._install_tessdata(PlanItem("tessdata", lang, lang, 0, ""), lambda *_: None)
+    try:  # Fraktur wird von keinem Test zwingend gebraucht – fehlt die Quelle, nur warnen
+        inst._install_tessdata(PlanItem("tessdata", "frak2021", "frak2021", 0, ""), lambda *_: None)
+    except Exception as exc:  # noqa: BLE001
+        print("Warnung: Fraktur-Modell nicht geladen:", exc)
     print("Testumgebung:", root)
 
 

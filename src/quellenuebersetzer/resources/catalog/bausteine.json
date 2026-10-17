@@ -116,7 +116,7 @@
     }
   },
   "tessdata": {
-    "_quelle": "tessdata_best (Commit e12c65a9) bzw. UB Mannheim (frak2021)",
+    "_quelle": "tessdata_best (Commit e12c65a9) bzw. UB Mannheim (frak2021, Kopie mit gleicher Prüfsumme als Release-Datei im Projekt)",
     "pol": {
       "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/pol.traineddata",
       "sha256": "e80cc4cefbdface06e9223f43f089556b9dcf104020fbc0a200f6863c57d4405",
@@ -148,7 +148,8 @@
       "license": "Apache-2.0"
     },
     "frak2021": {
-      "url": "https://ub-backup.bib.uni-mannheim.de/~stweil/tesstrain/frak2021/tessdata_best/frak2021-0.905.traineddata",
+      "url": "https://github.com/arnoldrautenberg490-blip/quellenuebersetzer/releases/download/modelle/frak2021-0.905.traineddata",
+      "mirrors": ["https://ub-backup.bib.uni-mannheim.de/~stweil/tesstrain/frak2021/tessdata_best/frak2021-0.905.traineddata"],
       "sha256": "1da2384254fa8462c776faf3b43307fe19ce51be0931c623b2fdd560f96e299a",
       "size": 3421140,
       "license": "Apache-2.0"
