@@ -1,0 +1,43 @@
+QUELLENÜBERSETZER
+=================
+
+Liest und übersetzt historische Quellen (zunächst Polnisch → Deutsch) vollständig auf diesem Rechner.
+Ihre Dokumente verlassen das Gerät nicht: Während der Verarbeitung ist jede Netzwerkverbindung nach
+außen technisch gesperrt. Es gibt keine Konten, keine Telemetrie und keine Kosten.
+
+So geht's
+---------
+1. Programm starten. Beim ersten Mal drei Fragen beantworten (Quellenart, Sprache, Zeitraum).
+2. Den Installationsplan ansehen und auf „Installieren“ klicken. Die Sprachmodelle werden geladen
+   (je nach Rechner 5–25 GB, einmalig).
+3. Danach: Datei oder Ordner hineinziehen oder den Pfad einfügen, Zielformate anhaken, „Übersetzen“.
+   Die Ergebnisse liegen im Unterordner „Übersetzungen“ neben Ihren Quellen.
+
+Wichtige Hinweise
+-----------------
+- Maschinelle Übersetzung – besonders bei historischen und entlegenen Quellen – ersetzt keine
+  qualifizierte menschliche Übersetzung. Markierte Stellen bitte am Original prüfen.
+- HANDSCHRIFTEN: Maschinelles Lesen historischer Handschrift ist nach heutigem Stand der Technik
+  chronisch unzuverlässig. Das Ergebnis ist immer nur eine Rohfassung – auch an Stellen, die nicht
+  markiert sind.
+
+Markierungen in den Dokumenten
+------------------------------
+  orange, gepunktet unterstrichen   Lesung unsicher (mögliche Lesarten in der Fußnote)
+  blau, unterstrichen               Bedeutungswandel (Wort hatte damals eine andere Bedeutung)
+  grün, gestrichelt unterstrichen   Begriff der Zeit (Amt, Maß, Münze, Rechtsbegriff …)
+Am Ende jedes Dokuments steht ein Verzeichnis aller markierten Stellen.
+
+Windows-Warnung beim ersten Start
+---------------------------------
+Erscheint „Der Computer wurde durch Windows geschützt“, auf „Weitere Informationen“ und dann auf
+„Trotzdem ausführen“ klicken. Die Meldung erscheint, weil das Programm (noch) nicht mit einem
+kostenpflichtigen Zertifikat signiert ist.
+
+Entfernen
+---------
+Einstellungen → „Alles entfernen …“ oder Windows-Einstellungen → Apps → „Quellenübersetzer“ →
+Deinstallieren. Dabei werden alle Modelle und Hilfsprogramme gelöscht; Ihr Glossar und Ihre
+Korrekturen werden vorher im Ordner „Dokumente“ gesichert. Ihre übersetzten Dokumente bleiben erhalten.
+
+Freie Software unter der GNU General Public License 3.0 oder später (siehe LIZENZ.txt).

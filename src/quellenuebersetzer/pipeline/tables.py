@@ -1,0 +1,185 @@
+"""Tabellen: Datenmodell, HTML-Ausgabe und Erkennung von Gittertabellen in Scans."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from quellenuebersetzer.pipeline.markup import markdown_cell_to_html
+
+
+@dataclass
+class Cell:
+    row: int
+    col: int
+    rowspan: int = 1
+    colspan: int = 1
+    markdown: str = ""
+    bbox: tuple[int, int, int, int] | None = None  # x0, y0, x1, y1 im Seitenbild
+    header: bool = False
+
+
+@dataclass
+class Table:
+    n_rows: int
+    n_cols: int
+    cells: list[Cell] = field(default_factory=list)
+    bbox: tuple[int, int, int, int] | None = None
+    notes: list[str] = field(default_factory=list)
+
+    def to_html(self) -> str:
+        by_row: dict[int, list[Cell]] = {}
+        for c in self.cells:
+            by_row.setdefault(c.row, []).append(c)
+        lines = ["<table>"]
+        for r in range(self.n_rows):
+            row = sorted(by_row.get(r, []), key=lambda c: c.col)
+            if not row:
+                continue
+            parts = []
+            for c in row:
+                tag = "th" if c.header else "td"
+                span = ""
+                if c.rowspan > 1:
+                    span += f' rowspan="{c.rowspan}"'
+                if c.colspan > 1:
+                    span += f' colspan="{c.colspan}"'
+                parts.append(f"<{tag}{span}>{markdown_cell_to_html(c.markdown.strip())}</{tag}>")
+            lines.append("<tr>" + "".join(parts) + "</tr>")
+        lines.append("</table>")
+        return "\n".join(lines)
+
+    def plausibility(self) -> list[str]:
+        """Einfache Prüfungen; Ergebnis sind Hinweise für das Verzeichnis unsicherer Stellen."""
+        issues = []
+        covered = np.zeros((self.n_rows, self.n_cols), dtype=int)
+        for c in self.cells:
+            covered[c.row:c.row + c.rowspan, c.col:c.col + c.colspan] += 1
+        if (covered == 0).any():
+            issues.append("Tabelle hat Lücken im Zellraster.")
+        if (covered > 1).any():
+            issues.append("Tabelle hat überlappende Zellen.")
+        issues.extend(_check_sums(self))
+        return issues
+
+
+_NUM_RE = re.compile(r"^[\s]*-?\d{1,3}(?:[ . ]?\d{3})*(?:[.,]\d+)?[\s]*$")
+
+
+def _to_number(text: str) -> float | None:
+    from quellenuebersetzer.pipeline.markup import strip_marks, unescape_md
+
+    t = unescape_md(strip_marks(text)).strip()
+    if not t or not _NUM_RE.match(t):
+        return None
+    t = t.replace(" ", "").replace(" ", "")
+    if "," in t and "." in t:
+        t = t.replace(".", "").replace(",", ".")
+    elif "," in t:
+        t = t.replace(",", ".")
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _check_sums(table: Table) -> list[str]:
+    """Erkennt Summenzeilen (letzte Zeile beginnt mit Summa/Razem/Ogółem …) und prüft sie nach."""
+    grid: dict[tuple[int, int], str] = {(c.row, c.col): c.markdown for c in table.cells if c.rowspan == c.colspan == 1}
+    last = table.n_rows - 1
+    first_cell = grid.get((last, 0), "").lower()
+    if not re.search(r"summa|razem|ogółem|ogolem|suma|zusammen|in summa", first_cell):
+        return []
+    issues = []
+    for col in range(1, table.n_cols):
+        total = _to_number(grid.get((last, col), ""))
+        if total is None:
+            continue
+        values = [_to_number(grid.get((r, col), "")) for r in range(last)]
+        nums = [v for v in values if v is not None]
+        if len(nums) >= 2 and abs(sum(nums) - total) > 0.01 * max(1.0, abs(total)):
+            issues.append(f"Spalte {col + 1}: Summe der Werte ({sum(nums):g}) weicht von der Summenzeile ({total:g}) ab.")
+    return issues
+
+
+# --------------------------------------------------------------------------- Gittererkennung
+
+
+def detect_ruled_tables(gray: np.ndarray, min_cells: int = 4) -> list[Table]:
+    """Findet Tabellen mit gezogenen Linien und bestimmt das Zellraster samt verbundenen Zellen."""
+    import cv2
+
+    h, w = gray.shape[:2]
+    binary = cv2.adaptiveThreshold(~gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, -2)
+    horiz = cv2.morphologyEx(binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (max(20, w // 30), 1)))
+    vert = cv2.morphologyEx(binary, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(20, h // 40))))
+    # kleine Lücken in Linien schließen (alte, verblasste Tabellen)
+    horiz = cv2.dilate(horiz, cv2.getStructuringElement(cv2.MORPH_RECT, (9, 3)))
+    vert = cv2.dilate(vert, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 9)))
+    grid = cv2.bitwise_or(horiz, vert)
+
+    contours, _ = cv2.findContours(grid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    tables = []
+    for cnt in contours:
+        x, y, cw, ch = cv2.boundingRect(cnt)
+        if cw < w * 0.2 or ch < h * 0.05:
+            continue
+        t = _grid_to_table(horiz[y:y + ch, x:x + cw], vert[y:y + ch, x:x + cw], (x, y))
+        if t and len(t.cells) >= min_cells:
+            tables.append(t)
+    tables.sort(key=lambda t: t.bbox[1])
+    return tables
+
+
+def _line_positions(profile: np.ndarray, min_fill: float, merge: int) -> list[int]:
+    idx = np.where(profile >= min_fill)[0]
+    if idx.size == 0:
+        return []
+    groups, start, prev = [], idx[0], idx[0]
+    for i in idx[1:]:
+        if i - prev > merge:
+            groups.append((start + prev) // 2)
+            start = i
+        prev = i
+    groups.append((start + prev) // 2)
+    return groups
+
+
+def _grid_to_table(horiz: np.ndarray, vert: np.ndarray, offset: tuple[int, int]) -> Table | None:
+    h, w = horiz.shape
+    ys = _line_positions((horiz > 0).sum(axis=1) / w, 0.25, 6)
+    xs = _line_positions((vert > 0).sum(axis=0) / h, 0.25, 6)
+    if len(ys) < 2 or len(xs) < 2:
+        return None
+    n_rows, n_cols = len(ys) - 1, len(xs) - 1
+
+    def has_vline(x: int, y0: int, y1: int) -> bool:
+        band = vert[y0 + 2:y1 - 2, max(0, x - 4):x + 5]
+        return band.size > 0 and (band.max(axis=1) > 0).mean() > 0.6
+
+    def has_hline(y: int, x0: int, x1: int) -> bool:
+        band = horiz[max(0, y - 4):y + 5, x0 + 2:x1 - 2]
+        return band.size > 0 and (band.max(axis=0) > 0).mean() > 0.6
+
+    owner = -np.ones((n_rows, n_cols), dtype=int)
+    cells: list[Cell] = []
+    ox, oy = offset
+    for r in range(n_rows):
+        for c in range(n_cols):
+            if owner[r, c] >= 0:
+                continue
+            # nach rechts ausdehnen, solange keine senkrechte Trennlinie
+            cs = 1
+            while c + cs < n_cols and not has_vline(xs[c + cs], ys[r], ys[r + 1]):
+                cs += 1
+            # nach unten ausdehnen, solange keine waagrechte Trennlinie über die ganze Breite
+            rs = 1
+            while r + rs < n_rows and not has_hline(ys[r + rs], xs[c], xs[c + cs]):
+                rs += 1
+            owner[r:r + rs, c:c + cs] = len(cells)
+            cells.append(
+                Cell(r, c, rs, cs, bbox=(ox + xs[c], oy + ys[r], ox + xs[c + cs], oy + ys[r + rs]), header=(r == 0))
+            )
+    return Table(n_rows, n_cols, cells, bbox=(ox, oy, ox + w, oy + h))

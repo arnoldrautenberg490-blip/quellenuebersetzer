@@ -1,0 +1,72 @@
+# Automatischer Bau: Tests → Programm (PyInstaller) → Setup.exe (Inno Setup) → bei Versions-Tag: Veröffentlichung.
+# Keine Kosten: GitHub Actions ist für öffentliche Projekte kostenlos.
+name: Bauen
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bauen:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Abhängigkeiten
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Testumgebung (Tesseract, Pandoc, Typst über den eigenen Installer)
+        run: python tools/testumgebung.py "${{ runner.temp }}\testroot"
+
+      - name: Tests
+        env:
+          QUE_TEST_ROOT: ${{ runner.temp }}\testroot
+        run: python -m pytest -q
+
+      - name: Programm bauen
+        run: python -m PyInstaller --noconfirm --clean --distpath build/dist --workpath build/work packaging/quellenuebersetzer.spec
+
+      - name: Startprüfung des fertigen Programms
+        run: build\dist\Quellenuebersetzer\Quellenuebersetzer.exe --pruefen
+
+      - name: Setup.exe bauen
+        shell: pwsh
+        run: |
+          $version = (python -c "import sys; sys.path.insert(0,'src'); import quellenuebersetzer; print(quellenuebersetzer.__version__)")
+          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $iscc) { choco install innosetup --no-progress -y; $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe" | Select-Object -First 1 }
+          & $iscc.FullName "/DAppVersion=$version" packaging\setup.iss
+
+      # Signatur (kostenlos über die SignPath Foundation, sobald der Antrag bewilligt ist):
+      # - uses: signpath/github-action-submit-signing-request@v1
+      #   with: { api-token: "${{ secrets.SIGNPATH_API_TOKEN }}", organization-id: "…", project-slug: "quellenuebersetzer",
+      #           signing-policy-slug: "release-signing", artifact-configuration-slug: "setup", github-artifact-id: "…" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Quellenuebersetzer-Setup
+          path: build/setup/*.exe
+
+      - name: Prüfsumme
+        shell: pwsh
+        run: Get-ChildItem build/setup/*.exe | ForEach-Object { (Get-FileHash $_ -Algorithm SHA256).Hash + "  " + $_.Name } | Out-File build/setup/SHA256.txt
+
+      - name: Veröffentlichen (nur bei Versions-Tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/setup/*.exe
+            build/setup/SHA256.txt

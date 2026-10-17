@@ -1,0 +1,1 @@
+"""Grafische Oberfläche (PySide6)."""

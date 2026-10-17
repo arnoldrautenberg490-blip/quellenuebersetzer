@@ -1,0 +1,268 @@
+{
+  "_hinweis": "Bausteinkatalog. Prüfsummen am 2026-10-16 aus den offiziellen Releases ermittelt. Neue Versionen: tools/katalog_pruefen.py",
+  "components": {
+    "7zip": {
+      "label": "Entpackhilfe (7-Zip)",
+      "purpose": "wird nur zum Entpacken der Texterkennung benötigt",
+      "license": "LGPL-2.1 (mit unRAR-Einschränkung)",
+      "license_url": "https://www.7-zip.org/license.txt",
+      "files": [
+        {
+          "url": "https://github.com/ip7z/7zip/releases/download/26.04/7zr.exe",
+          "sha256": "256feca8e274e5da655e2a284fabafd9f554365eb164862089dacd4e8276d282",
+          "size": 602624,
+          "name": "7zr.exe"
+        },
+        {
+          "url": "https://github.com/ip7z/7zip/releases/download/26.04/7z2604-x64.exe",
+          "sha256": "d54bf805f9f3704d1e8db2fa3498ae7ef2df0312b40b558e7c71c734430a665d",
+          "size": 1664082,
+          "name": "7z-setup.exe"
+        }
+      ],
+      "install": "sevenzip",
+      "target": "runtime/7zip",
+      "check": "runtime/7zip/7z.exe"
+    },
+    "tesseract": {
+      "label": "Texterkennung (Tesseract 5.5.3)",
+      "purpose": "klassische Texterkennung mit Sicherheitswert für jedes Wort",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/tesseract-ocr/tesseract/blob/main/LICENSE",
+      "requires": [
+        "7zip"
+      ],
+      "files": [
+        {
+          "url": "https://github.com/tesseract-ocr/tesseract/releases/download/5.5.3/tesseract-ocr-w64-setup-5.5.3.20260724.exe",
+          "sha256": "bee9e3434bd94fd65387d9be28cd467a41f61b1275383b55b0f59a1331270ae4",
+          "size": 26573224,
+          "name": "tesseract-setup.exe"
+        }
+      ],
+      "install": "nsis",
+      "target": "runtime/tesseract",
+      "check": "runtime/tesseract/tesseract.exe"
+    },
+    "ollama": {
+      "label": "Modell-Laufzeit (Ollama 0.40.5)",
+      "purpose": "führt die Sprachmodelle lokal auf der Grafikkarte aus",
+      "license": "MIT",
+      "license_url": "https://github.com/ollama/ollama/blob/main/LICENSE",
+      "files": [
+        {
+          "url": "https://github.com/ollama/ollama/releases/download/v0.40.5/ollama-windows-amd64.zip",
+          "sha256": "5134ce7e3bc8e94d0494721c799ec293b429450d0c52461b0ee3647dd3bb4bb7",
+          "size": 1471226485,
+          "name": "ollama-windows-amd64.zip"
+        }
+      ],
+      "install": "zip",
+      "target": "runtime/ollama",
+      "check": "runtime/ollama/ollama.exe"
+    },
+    "pandoc": {
+      "label": "Dokumentumwandlung (Pandoc 3.12.1)",
+      "purpose": "erzeugt DOCX, EPUB und PDF",
+      "license": "GPL-2.0-or-later",
+      "license_url": "https://github.com/jgm/pandoc/blob/main/COPYRIGHT",
+      "files": [
+        {
+          "url": "https://github.com/jgm/pandoc/releases/download/3.12.1/pandoc-3.12.1-windows-x86_64.zip",
+          "sha256": "6ef431cb20b2c24a0371fc19200dc49d452be54b1b5c9239f3462841ef53e587",
+          "size": 42154914,
+          "name": "pandoc.zip"
+        }
+      ],
+      "install": "zip",
+      "strip_top_dir": true,
+      "target": "runtime/pandoc",
+      "check": "runtime/pandoc/pandoc.exe"
+    },
+    "typst": {
+      "label": "PDF-Satz (Typst 0.15.1)",
+      "purpose": "setzt die PDF-Ausgabe",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/typst/typst/blob/main/LICENSE",
+      "files": [
+        {
+          "url": "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-pc-windows-msvc.zip",
+          "sha256": "19ce3551153c2fe7ee9fa2f95208310c8f4d3209fedb699e0333faf8913f6736",
+          "size": 22463684,
+          "name": "typst.zip"
+        }
+      ],
+      "install": "zip",
+      "strip_top_dir": true,
+      "target": "runtime/typst",
+      "check": "runtime/typst/typst.exe"
+    },
+    "layout": {
+      "label": "Seitenaufbau-Erkennung (PP-DocLayoutV3)",
+      "purpose": "erkennt Absätze, Spalten, Tabellen, Abbildungen, Randnotizen und die Lesereihenfolge",
+      "license": "Apache-2.0",
+      "license_url": "https://huggingface.co/PaddlePaddle/PP-DocLayoutV3",
+      "files": [
+        {
+          "url": "https://huggingface.co/phungpx/PP-DocLayoutV3-ONNX/resolve/9dedaf7180045648d81929099a1391ef5d9b443c/pp_doclayoutv3.onnx",
+          "sha256": "29193c815d2d9a9db42cdebe400862fbdbf64e7e14c06f8b1f5064657c769b88",
+          "size": 133739324,
+          "name": "pp_doclayoutv3.onnx"
+        }
+      ],
+      "install": "file",
+      "target": "runtime/layout",
+      "check": "runtime/layout/pp_doclayoutv3.onnx"
+    }
+  },
+  "tessdata": {
+    "_quelle": "tessdata_best (Commit e12c65a9) bzw. UB Mannheim (frak2021)",
+    "pol": {
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/pol.traineddata",
+      "sha256": "e80cc4cefbdface06e9223f43f089556b9dcf104020fbc0a200f6863c57d4405",
+      "size": 11978867,
+      "license": "Apache-2.0"
+    },
+    "deu": {
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/deu.traineddata",
+      "sha256": "8407331d6aa0229dc927685c01a7938fc5a641d1a9524f74838cdac599f0d06e",
+      "size": 8628461,
+      "license": "Apache-2.0"
+    },
+    "lat": {
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/lat.traineddata",
+      "sha256": "60054dd32ac03ebd9b4f87d0665bd491a7ffe0d3ee99ceb91aefaf348b65e94f",
+      "size": 9705145,
+      "license": "Apache-2.0"
+    },
+    "deu_latf": {
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/deu_latf.traineddata",
+      "sha256": "429b8c33d37e1a4823a2bb082a644ff13e252f735b7945e08a518d22ddcc459e",
+      "size": 12938047,
+      "license": "Apache-2.0"
+    },
+    "osd": {
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/osd.traineddata",
+      "sha256": "9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff",
+      "size": 10562727,
+      "license": "Apache-2.0"
+    },
+    "frak2021": {
+      "url": "https://ub-backup.bib.uni-mannheim.de/~stweil/tesstrain/frak2021/tessdata_best/frak2021-0.905.traineddata",
+      "sha256": "1da2384254fa8462c776faf3b43307fe19ce51be0931c623b2fdd560f96e299a",
+      "size": 3421140,
+      "license": "Apache-2.0"
+    }
+  },
+  "models": {
+    "gemma4:31b-it-qat": {
+      "label": "Gemma 4 (31B)",
+      "size": 18851735688,
+      "vram_gb": 22,
+      "license": "Apache-2.0",
+      "vision": true
+    },
+    "gemma4:12b-it-q8_0": {
+      "label": "Gemma 4 (12B, hohe Genauigkeit)",
+      "size": 12844771528,
+      "vram_gb": 15,
+      "license": "Apache-2.0",
+      "vision": true
+    },
+    "gemma4:12b-it-qat": {
+      "label": "Gemma 4 (12B)",
+      "size": 7151003208,
+      "vram_gb": 10,
+      "license": "Apache-2.0",
+      "vision": true
+    },
+    "gemma4:e4b-it-qat": {
+      "label": "Gemma 4 (E4B, kompakt)",
+      "size": 6146501256,
+      "vram_gb": 7,
+      "license": "Apache-2.0",
+      "vision": true
+    },
+    "gemma4:e2b-it-qat": {
+      "label": "Gemma 4 (E2B, Notbetrieb)",
+      "size": 4336357640,
+      "vram_gb": 5,
+      "license": "Apache-2.0",
+      "vision": true
+    },
+    "glm-ocr:latest": {
+      "label": "GLM-OCR (Text- und Tabellenerkennung)",
+      "size": 2655025567,
+      "vram_gb": 3,
+      "license": "MIT",
+      "vision": true
+    },
+    "glm-ocr:q8_0": {
+      "label": "GLM-OCR (kompakt)",
+      "size": 1819687327,
+      "vram_gb": 2,
+      "license": "MIT",
+      "vision": true
+    }
+  },
+  "tiers": [
+    {
+      "key": "stufe1",
+      "min_vram_gb": 22,
+      "main": "gemma4:31b-it-qat",
+      "ocr": "glm-ocr:latest",
+      "label": "Höchste Qualität",
+      "quality": 1
+    },
+    {
+      "key": "stufe2",
+      "min_vram_gb": 15,
+      "main": "gemma4:12b-it-q8_0",
+      "ocr": "glm-ocr:latest",
+      "label": "Hohe Qualität",
+      "quality": 2
+    },
+    {
+      "key": "stufe3",
+      "min_vram_gb": 11,
+      "main": "gemma4:12b-it-qat",
+      "ocr": "glm-ocr:latest",
+      "label": "Gute Qualität",
+      "quality": 3
+    },
+    {
+      "key": "stufe4",
+      "min_vram_gb": 7,
+      "main": "gemma4:e4b-it-qat",
+      "ocr": "glm-ocr:q8_0",
+      "label": "Kompakt",
+      "quality": 4,
+      "gruendlich": {
+        "main": "gemma4:12b-it-qat",
+        "min_ram_gb": 16,
+        "quality": 3
+      }
+    },
+    {
+      "key": "stufe5",
+      "min_vram_gb": 5.5,
+      "main": "gemma4:e4b-it-qat",
+      "ocr": "glm-ocr:q8_0",
+      "label": "Kleine Grafikkarte (6 GB)",
+      "quality": 4,
+      "gruendlich": {
+        "main": "gemma4:12b-it-qat",
+        "min_ram_gb": 16,
+        "quality": 3
+      }
+    },
+    {
+      "key": "stufe6",
+      "min_vram_gb": 0,
+      "main": "gemma4:e2b-it-qat",
+      "ocr": "glm-ocr:q8_0",
+      "label": "Notbetrieb ohne geeignete Grafikkarte",
+      "quality": 5
+    }
+  ]
+}

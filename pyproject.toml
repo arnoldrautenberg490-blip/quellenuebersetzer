@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quellenuebersetzer"
+version = "0.1.0"
+description = "Lokales, datenschutzfreundliches Lesen und Übersetzen historischer Quellen"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6-Essentials>=6.8",
+    "pypdfium2>=4.30",
+    "pdfplumber>=0.11",
+    "python-docx>=1.1",
+    "opencv-python-headless>=4.10",
+    "numpy>=2.0",
+    "pillow>=11.0",
+    "rapidfuzz>=3.10",
+    "psutil>=6.0",
+    "onnxruntime>=1.20",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6.10"]
+
+[project.gui-scripts]
+quellenuebersetzer = "quellenuebersetzer.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+quellenuebersetzer = ["resources/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

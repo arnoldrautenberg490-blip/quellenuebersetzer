@@ -1,0 +1,77 @@
+{
+  "code": "pl",
+  "label": "Polnisch",
+  "name_en": "Polish",
+  "tesseract": {
+    "druck": [
+      "pol"
+    ],
+    "schreibmaschine": [
+      "pol"
+    ],
+    "tabellen": [
+      "pol"
+    ],
+    "altdruck": [
+      "frak2021",
+      "pol"
+    ],
+    "handschrift": [],
+    "_zusatz": "Lateinische und deutsche Einschübe sind in polnischen Archiven häufig.",
+    "zusatz": [
+      "lat",
+      "deu",
+      "osd"
+    ]
+  },
+  "prompt": {
+    "sprache_quelle": "Polnisch",
+    "historische_hinweise": [
+      "Ältere Texte verwenden oft abweichende Schreibweisen (z. B. y/j, é, á, ó-Varianten, Zusammenschreibungen). Gib sie in der Umschrift unverändert wieder.",
+      "Lateinische Einschübe und Formeln sind in Rechts- und Kirchentexten häufig; übersetze sie mit und markiere sie nicht als Fehler.",
+      "Orts- und Personennamen bleiben in der Originalform; eingebürgerte deutsche Exonyme dürfen in Klammern ergänzt werden."
+    ]
+  },
+  "dictionaries": [
+    {
+      "id": "pl-wiktionary",
+      "label": "Wiktionary – Polnisch (historische und veraltete Bedeutungen)",
+      "purpose": "Bedeutungswandel und Begriffe der Zeit; Flexionsformen zur Grundform",
+      "periods": [
+        "vor1500",
+        "16jh",
+        "17jh",
+        "18jh",
+        "19jh",
+        "1900_1945",
+        "nach1945"
+      ],
+      "license": "CC BY-SA 4.0",
+      "attribution": "Wiktionary-Autorinnen und -Autoren (en.wiktionary.org); aufbereitet mit wiktextract (kaikki.org)",
+      "file": "pl-wiktionary.sqlite",
+      "bundled": true,
+      "url": null,
+      "sha256": null,
+      "size": null
+    },
+    {
+      "id": "pl-gloger",
+      "label": "Gloger, Encyklopedja staropolska (1900–1903)",
+      "purpose": "Ämter, Stände, Maße, Münzen, Rechtsbegriffe der alten Rzeczpospolita",
+      "periods": [
+        "vor1500",
+        "16jh",
+        "17jh",
+        "18jh",
+        "19jh"
+      ],
+      "license": "gemeinfrei; Transkription Wikisource CC BY-SA 4.0",
+      "attribution": "Zygmunt Gloger; Wikisource-Bearbeiterinnen und -Bearbeiter (pl.wikisource.org)",
+      "file": "pl-gloger.sqlite",
+      "bundled": true,
+      "url": null,
+      "sha256": null,
+      "size": null
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+# Entwicklungsumgebung und Bauergebnisse
+.venv/
+build/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Sicherheitsnetz: niemals echte Quellen oder Ergebnisse ins öffentliche Projekt
+Übersetzungen/
+quellen/
+*.pdf
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.docx
+*.epub
+!src/quellenuebersetzer/resources/export/referenz.docx
