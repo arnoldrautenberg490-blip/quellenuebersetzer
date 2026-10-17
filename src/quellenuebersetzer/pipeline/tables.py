@@ -183,3 +183,80 @@ def _grid_to_table(horiz: np.ndarray, vert: np.ndarray, offset: tuple[int, int])
                 Cell(r, c, rs, cs, bbox=(ox + xs[c], oy + ys[r], ox + xs[c + cs], oy + ys[r + rs]), header=(r == 0))
             )
     return Table(n_rows, n_cols, cells, bbox=(ox, oy, ox + w, oy + h))
+
+
+# --------------------------------------------------------------------------- Tabellen ohne Gitterlinien
+
+def table_from_words(lines, min_rows: int = 2, min_cols: int = 2):
+    """Baut eine Tabelle ohne Linien aus Tesseract-Wortpositionen (Zeilen nach Höhe, Spalten nach Lücken).
+
+    Es entsteht nur, was Tesseract tatsächlich gelesen hat – keine erfundenen Inhalte.
+    Ergebnis: (Table, {(Zeile, Spalte): [Word, …]}) oder None, wenn keine Tabellenstruktur erkennbar ist.
+    """
+    import statistics
+
+    words = [w for ln in lines for w in ln.words if w.text.strip()]
+    if len(words) < min_rows * min_cols:
+        return None
+    heights = [w.bbox[3] - w.bbox[1] for w in words]
+    hmed = statistics.median(heights) or 10
+    # Zeilen: nach senkrechter Mitte gruppieren
+    words.sort(key=lambda w: (w.bbox[1] + w.bbox[3]) / 2)
+    rows: list[list] = []
+    for w in words:
+        cy = (w.bbox[1] + w.bbox[3]) / 2
+        if rows and abs(cy - statistics.mean((x.bbox[1] + x.bbox[3]) / 2 for x in rows[-1])) < hmed * 0.6:
+            rows[-1].append(w)
+        else:
+            rows.append([w])
+    if len(rows) < min_rows:
+        return None
+    # Wortgruppen je Zeile (Wörter mit normalem Wortabstand gehören zusammen)
+    phrases_by_row = []
+    for row in rows:
+        row.sort(key=lambda w: w.bbox[0])
+        phrases = [[row[0]]]
+        for w in row[1:]:
+            if w.bbox[0] - phrases[-1][-1].bbox[2] < hmed * 1.2:
+                phrases[-1].append(w)
+            else:
+                phrases.append([w])
+        phrases_by_row.append(phrases)
+    # Spaltengrenzen: Lücken, die in keiner Zeile von einer Wortgruppe überdeckt werden
+    spans = sorted((p[0].bbox[0], p[-1].bbox[2]) for ph in phrases_by_row for p in ph)
+    columns = [[spans[0][0], spans[0][1]]]
+    for a, b in spans[1:]:
+        if a - columns[-1][1] > hmed * 0.8:
+            columns.append([a, b])
+        else:
+            columns[-1][1] = max(columns[-1][1], b)
+    if len(columns) < min_cols:
+        return None
+    rows_with_multiple = sum(1 for ph in phrases_by_row if len(ph) >= 2)
+    if rows_with_multiple < max(2, len(rows) // 2):
+        return None  # eher Fließtext als Tabelle
+    cells: list[Cell] = []
+    cell_words: dict[tuple[int, int], list] = {}
+    for r, phrases in enumerate(phrases_by_row):
+        for p in phrases:
+            x0, x1 = p[0].bbox[0], p[-1].bbox[2]
+            covered = [c for c, (a, b) in enumerate(columns) if min(x1, b) > max(x0, a)]
+            if not covered:
+                continue
+            c0, c1 = covered[0], covered[-1]
+            key = (r, c0)
+            if key in cell_words:
+                cell_words[key].extend(p)
+                continue
+            cell_words[key] = list(p)
+            bbox = (min(w.bbox[0] for w in p), min(w.bbox[1] for w in p), max(w.bbox[2] for w in p),
+                    max(w.bbox[3] for w in p))
+            cells.append(Cell(r, c0, 1, c1 - c0 + 1, "", bbox=bbox, header=(r == 0)))
+    # leere Plätze auffüllen, damit das Raster vollständig ist
+    occupied = {(c.row, col) for c in cells for col in range(c.col, c.col + c.colspan)}
+    for r in range(len(rows)):
+        for c in range(len(columns)):
+            if (r, c) not in occupied:
+                cells.append(Cell(r, c, 1, 1, "", header=(r == 0)))
+    cells.sort(key=lambda c: (c.row, c.col))
+    return Table(len(rows), len(columns), cells), cell_words

@@ -73,6 +73,18 @@ def split_parts(text: str, n_markers: int) -> list[str] | None:
     return parts if len(parts) == n_markers + 1 and all(parts) else None
 
 
+def balanced(unit: list[LRegion], parts: list[str], low: float = 0.45, high: float = 2.6) -> bool:
+    """Passt jeder übersetzte Teil in der Länge zu seinem Originalbereich?"""
+    for r, part in zip(unit, parts):
+        src = len(markup.strip_marks(r.source_md))
+        if src < 40:
+            continue  # bei sehr kurzen Bereichen ist das Verhältnis wenig aussagekräftig
+        ratio = len(markup.strip_marks(part)) / src
+        if not low <= ratio <= high:
+            return False
+    return True
+
+
 def translate_layout(doc: LayoutDocument, tr: Translator, progress: Callable[[int, int], None] | None = None,
                      on_page_done: Callable[[object], None] | None = None) -> None:
     regions = [r for p in doc.pages for r in p.regions
@@ -105,6 +117,8 @@ def translate_layout(doc: LayoutDocument, tr: Translator, progress: Callable[[in
                 for k, r in enumerate(unit, start=1)
             )
             parts = split_parts(tr.translate_segment(Segment("text", joined), previous), len(unit) - 1)
+            if parts and not balanced(unit, parts):
+                parts = None  # Sätze über die Marken verschoben → ein Bereich bekäme zu viel/zu wenig Text
             if parts:
                 for r, part in zip(unit, parts):
                     r.target_md = part

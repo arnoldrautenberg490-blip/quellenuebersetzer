@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 
 from quellenuebersetzer.netguard import offline_env
+from quellenuebersetzer.pipeline.fitting import expand_boxes, fit_text
 from quellenuebersetzer.pipeline import markup
 from quellenuebersetzer.pipeline.layout_doc import HEADING_KINDS, IMAGE_KINDS, LayoutDocument, LPage, LRegion
 from quellenuebersetzer.planner import GENERAL_DISCLAIMER, HANDWRITING_WARNING
@@ -71,6 +72,7 @@ class Notes:
     items: list[tuple[str, int, str]] = field(default_factory=list)  # (Seitenbezeichnung, Nr., Text)
     page: str = ""
     counter: int = 0
+    shortened: list[tuple[str, str]] = field(default_factory=list)  # (Seitenbezeichnung, vollständiger Text)
 
     def add(self, mark: markup.Mark) -> int:
         self.counter += 1
@@ -189,27 +191,24 @@ def erase_text(background: Path, page: LPage, out: Path) -> Path:
 # --------------------------------------------------------------------------- Seitensatz
 
 PREAMBLE = r'''
-#set text(font: "Libertinus Serif", lang: "de", hyphenate: true)
-#set par(spacing: 0.4em)
-#let fitted(w, h, size, al, wt, body) = context {
-  let make(s) = block(width: w, {
-    set text(size: s, weight: wt)
-    set par(leading: 0.42 * s, justify: al == "justify")
+#set text(font: ("Times New Roman", "Libertinus Serif"), lang: "de", hyphenate: false)
+#set par(spacing: 0.3em)
+#let placed(w, h, size, lead, track, al, wt, st, col, body) = move(dy: -0.35 * size,
+  block(width: w, height: h + 0.35 * size, clip: true, inset: (top: 0.35 * size), {
+    // Luft oben: Akzente über Versalien (Ü, Ś, Ż) ragen über den am Scan gemessenen Rahmen hinaus
+    set text(size: size, weight: wt, style: st, tracking: track, fill: col)
+    set par(leading: lead, justify: al == "justify")
     align(if al == "center" { center } else if al == "right" { right } else { left }, body)
-  })
-  let s = size
-  while s > size * MINSCALE and measure(make(s)).height > h { s = s * 0.95 }
-  box(width: w, height: h, make(s))
-}
-'''.replace("MINSCALE", str(MIN_SCALE))
+  }))
+'''
 
 
 def _pt(px: float, dpi: float) -> float:
     return px / dpi * 72.0
 
 
-def _region_typst(r: LRegion, page: LPage, notes: Notes, faksimile: bool) -> str:
-    x0, y0, x1, y1 = r.box
+def _region_typst(r: LRegion, page: LPage, notes: Notes, faksimile: bool, box_px=None) -> str:
+    x0, y0, x1, y1 = box_px or r.box
     dpi = page.dpi
     dx, dy, w, h = _pt(x0, dpi), _pt(y0, dpi), _pt(x1 - x0, dpi), _pt(y1 - y0, dpi)
     place = f"#place(top + left, dx: {dx:.2f}pt, dy: {dy:.2f}pt)"
@@ -220,19 +219,26 @@ def _region_typst(r: LRegion, page: LPage, notes: Notes, faksimile: bool) -> str
     text = r.target_md or r.source_md
     if not text.strip():
         return ""
+    bold = r.bold or r.kind in HEADING_KINDS
+    weight = '"bold"' if bold else '"regular"'
+    style = '"italic"' if r.italic else '"normal"'
+    fill = f'rgb("{r.color}")' if r.color else 'rgb("#1e1b17")'
     if r.kind == "tabelle":
         body = table_to_typst(text, notes)
-        size = 9.0
-    else:
-        body = md_to_typst(text, notes)
-        line_pt = _pt(r.line_px or (y1 - y0), dpi)
-        size = max(5.0, min(40.0, line_pt * 0.92))
+        if not body:
+            return ""
+        return (f'{place}[#placed({w:.2f}pt, {h:.2f}pt, 9pt, 0.2em, 0em, "left", "regular", "normal", '
+                f'rgb("#1e1b17"), [{body}])]')
+    base = max(5.0, min(40.0, _pt(r.line_px or (y1 - y0), dpi) * 0.92))
+    fit = fit_text(text, (dx, dy, w, h), base, bold, r.italic, r.spaced)
+    if fit.truncated:
+        notes.shortened.append((page.name, text))
+    body = md_to_typst(fit.text_md, notes)
     if not body:
         return ""
-    weight = '"bold"' if r.bold or r.kind in HEADING_KINDS else '"regular"'
-    al = r.align if r.kind != "tabelle" else "left"
-    # Bereich minimal vergrößern: Satzschrift läuft etwas weiter als die gemessene Scanschrift
-    return f'{place}[#fitted({w * 1.02:.2f}pt, {h * 1.06:.2f}pt, {size:.2f}pt, "{al}", {weight}, [{body}])]'
+    lead = max(0.05, fit.leading - 0.662) * fit.size  # Typst: Abstand zwischen Zeilen ab Versalhöhe
+    return (f'{place}[#placed({w:.2f}pt, {h:.2f}pt, {fit.size:.2f}pt, {lead:.2f}pt, {fit.tracking:.3f}em, '
+            f'"{r.align}", {weight}, {style}, {fill}, [{body}])]')
 
 
 def build_typst(doc: LayoutDocument, faksimile: bool, translated: bool, handwriting: bool, title: str,
@@ -253,10 +259,11 @@ def build_typst(doc: LayoutDocument, faksimile: bool, translated: bool, handwrit
             bg = f', background: image("{name}", width: 100%, height: 100%)'
         parts.append(f"#page(width: {w_pt:.2f}pt, height: {h_pt:.2f}pt, margin: 0pt{bg})[")
         if translated or not faksimile:
+            boxes = expand_boxes(page.regions, page.height_px)
             for r in page.regions:
                 if not translated:
                     r = LRegion(**{**r.__dict__, "target_md": r.source_md})
-                parts.append(_region_typst(r, page, notes, faksimile))
+                parts.append(_region_typst(r, page, notes, faksimile, boxes.get(r.id)))
         parts.append("]")
     if not appendix:
         return "\n".join(p for p in parts if p)
@@ -271,6 +278,12 @@ def build_typst(doc: LayoutDocument, faksimile: bool, translated: bool, handwrit
         parts.append(f'#block(fill: rgb("#fbe9e6"), stroke: 0.8pt + rgb("#b3402f"), inset: 8pt, radius: 3pt)'
                      f'[#strong[{_tstr("Warnhinweis Handschrift: ")}]{_tstr(HANDWRITING_WARNING)}]')
     parts.append(f'#block(fill: rgb("#f6f1e7"), stroke: 0.8pt + rgb("#b9ae98"), inset: 8pt, radius: 3pt)[{_tstr(GENERAL_DISCLAIMER)}]')
+    if notes.shortened:
+        parts.append(f"#heading(level: 2)[{_tstr('Vollständiger Text gekürzter Bereiche')}]")
+        parts.append(_tstr("Diese Bereiche passten auch bei engem Satz nicht vollständig auf ihre Seite "
+                           "und sind dort mit […] gekürzt.") + "\n")
+        for page_label, md in notes.shortened:
+            parts.append(f"#block[#strong[{_tstr(f'S. {page_label}: ')}]{md_to_typst(md, Notes())}]")
     if notes.items:
         parts.append(f"#heading(level: 2)[{_tstr('Anmerkungen')}]")
         parts.append(_tstr("Orange gepunktet = Lesung unsicher · blau = Bedeutungswandel · grün gestrichelt = Begriff der Zeit.") + "\n")

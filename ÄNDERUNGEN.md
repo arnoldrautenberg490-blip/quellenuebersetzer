@@ -84,8 +84,22 @@ Stand: 17.10.2026 · Version 0.1.0 (in Entwicklung, noch nicht veröffentlicht)
 - Verzerrte Doppelscans → Entzerrung und einheitliches Format in Phase 1.
 - Bilder hinter dem Text → Überlappungen im Seitenaufbau werden aufgelöst.
 
+## Nachbesserung nach Durchsicht der Übersetzungen (17.10.2026)
+- **Keine erfundenen Tabelleninhalte mehr:** Tabellen ohne Linien werden aus den Wortpositionen der
+  Texterkennung aufgebaut; das Lesemodell liest nur noch einzelne unsichere Zellen gegen (kein „Ablesen“
+  ganzer Tabellen mehr). Ohne erkennbare Tabellenstruktur wird der Bereich als Text gelesen.
+- **Zahlenprüfung:** Zahlen, Jahreszahlen und Beträge müssen in der Übersetzung exakt erhalten bleiben –
+  bei Tabellen Zelle für Zelle; sonst zweiter Versuch bzw. zellweise Übersetzung.
+- **Gestaltung wird übernommen:** Schriftfarbe (z. B. rote Rubriken), Fettdruck (Strichstärke), Kursive
+  (Neigung) und Sperrsatz werden am Scan gemessen und in PDF und Word wiedergegeben.
+- **Keine Überschneidungen:** Text wächst zuerst in freien Raum, dann wird der Zeilenabstand verringert,
+  dann die Laufweite, erst dann die Schrift (bis 60 %); notfalls Kürzung mit […] und vollständiger Text
+  im Anhang. Berechnung gemeinsam für PDF und Word (gleiche Schrift Times New Roman).
+- Gebündelte Übersetzung: jeder Teil muss in der Länge zu seinem Bereich passen, sonst Bereich für Bereich.
+- Akzente über Großbuchstaben (Ü, Ś, Ż) werden nicht mehr abgeschnitten (PDF und Word).
+
 ## Qualitätssicherung
-- 70 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit).
+- 78 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit).
 - Tests mit echten Modellen auf dem Entwicklungsrechner (ohne Grafikkarte): Gemma 4 E2B und 12B.
 - Setup.exe mehrfach installiert, gestartet und rückstandslos deinstalliert.
 

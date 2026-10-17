@@ -160,3 +160,24 @@ def test_pages_are_reported_in_order_when_finished():
     done = []
     translate_layout(doc, _tr(c), on_page_done=lambda p: done.append(p.number))
     assert done == [1, 2, 3, 4]
+
+
+def test_changed_table_numbers_are_rejected():
+    table = Table(2, 2, [Cell(0, 0, markdown="Miejscowość", header=True), Cell(0, 1, markdown="Złote", header=True),
+                         Cell(1, 0, markdown="Bronowice"), Cell(1, 1, markdown="6")]).to_html()
+    invented = {"translation": table.replace("Miejscowość", "Ort").replace("Złote", "Złoty").replace(">6<", ">60<"),
+                "readings": [], "terms": []}
+    correct = {"translation": table.replace("Miejscowość", "Ort").replace("Złote", "Złoty"), "readings": [], "terms": []}
+    c = ScriptedClient([invented, correct])
+    out = _tr(c).translate_segment(Segment("tabelle", table))
+    assert ">6<" in out and ">60<" not in out
+    assert "Numbers changed in table cells [4]" in c.requests[1][-1]["content"]
+
+
+def test_changed_years_in_text_are_rejected():
+    c = ScriptedClient([
+        {"translation": "Akten der Stadt Krakau aus dem Jahr 1758.", "readings": [], "terms": []},
+        {"translation": "Akten der Stadt Krakau aus dem Jahr 1785.", "readings": [], "terms": []},
+    ])
+    out = _tr(c).translate_segment(Segment("text", "Akta miasta Krakowa z roku 1785."))
+    assert "1785" in out and "Numbers" in c.requests[1][-1]["content"]

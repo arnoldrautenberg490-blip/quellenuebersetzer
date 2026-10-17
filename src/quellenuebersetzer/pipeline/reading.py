@@ -145,8 +145,6 @@ class PageReader:
             x0, y0, x1, y1 = t.bbox
             masked[y0:y1, x0:x1] = 255
 
-        if not work.tables and self.kind == SourceKind.TABELLEN and self.glm:
-            work.gridless_table_png = encode_png(enhanced, max_side=2200)
 
         ocr = self.tesseract.run_tsv(masked, self.langs, psm=3) if self.tesseract else OcrPage()
         heights = [ln.height for ln in ocr.lines if ln.height > 0]

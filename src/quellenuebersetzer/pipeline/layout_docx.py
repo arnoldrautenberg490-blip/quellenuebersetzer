@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import html
+from dataclasses import dataclass
 import os
 import re
 from functools import lru_cache
@@ -27,6 +28,7 @@ from PIL import ImageFont
 from quellenuebersetzer.config import resources_dir
 from quellenuebersetzer.pipeline import markup
 from quellenuebersetzer.pipeline.layout_doc import HEADING_KINDS, IMAGE_KINDS, LayoutDocument, LPage, LRegion
+from quellenuebersetzer.pipeline.fitting import expand_boxes, fit_text
 from quellenuebersetzer.pipeline.layout_render import MIN_SCALE, Notes, erase_text
 from quellenuebersetzer.planner import GENERAL_DISCLAIMER, HANDWRITING_WARNING
 
@@ -77,44 +79,63 @@ def fit_size(text: str, width_pt: float, height_pt: float, size_pt: float, bold:
 
 # --------------------------------------------------------------------------- XML-Bausteine
 
-def _run(text: str, size_pt: float, bold: bool = False, style_id: str | None = None, superscript: bool = False) -> str:
+@dataclass
+class RunStyle:
+    bold: bool = False
+    italic: bool = False
+    color: str = ""  # Hex
+    tracking_twips: int = 0  # Laufweite in Zwanzigstel-Punkt
+
+
+def _run(text: str, size_pt: float, bold: bool = False, style_id: str | None = None, superscript: bool = False,
+         st: "RunStyle | None" = None) -> str:
     rpr = [f'<w:rFonts w:ascii="{FONT}" w:hAnsi="{FONT}" w:cs="{FONT}"/>']
     if style_id:
         rpr.insert(0, f'<w:rStyle w:val="{style_id}"/>')
-    if bold:
+    if bold or (st and st.bold):
         rpr.append("<w:b/>")
+    if st and st.italic:
+        rpr.append("<w:i/>")
+    if st and st.color and not style_id:
+        rpr.append(f'<w:color w:val="{st.color.lstrip("#").upper()}"/>')
+    if st and st.tracking_twips:
+        rpr.append(f'<w:spacing w:val="{st.tracking_twips}"/>')
     if superscript:
         rpr.append('<w:vertAlign w:val="superscript"/>')
     rpr.append(f'<w:sz w:val="{max(2, round(size_pt * 2))}"/><w:szCs w:val="{max(2, round(size_pt * 2))}"/>')
     return f'<w:r><w:rPr>{"".join(rpr)}</w:rPr><w:t xml:space="preserve">{escape(text)}</w:t></w:r>'
 
 
-def _runs_from_md(md: str, size: float, bold: bool, notes: Notes, style_ids: dict[str, str]) -> tuple[str, str]:
-    """→ (Runs-XML, Klartext für die Größenberechnung)."""
+def _runs_from_md(md: str, size: float, bold: bool, notes: Notes, style_ids: dict[str, str],
+                  st: RunStyle | None = None) -> tuple[str, str]:
+    """→ (Runs-XML, Klartext)."""
     out, plain, pos = [], [], 0
     for start, end, mark in markup.find_marks(md):
         t = markup.unescape_md(md[pos:start])
         if t:
-            out.append(_run(t, size, bold))
+            out.append(_run(t, size, bold, st=st))
             plain.append(t)
-        out.append(_run(mark.text, size, bold, style_ids.get(mark.category)))
-        out.append(_run(str(notes.add(mark)), size, bold, superscript=True))
+        out.append(_run(mark.text, size, bold, style_ids.get(mark.category), st=st))
+        out.append(_run(str(notes.add(mark)), size, bold, superscript=True, st=st))
         plain.append(mark.text + "¹")
         pos = end
     t = markup.unescape_md(md[pos:])
     if t:
-        out.append(_run(t, size, bold))
+        out.append(_run(t, size, bold, st=st))
         plain.append(t)
     return "".join(out), "".join(plain)
 
 
-def _frame_paragraph(runs: str, x: float, y: float, w: float, h: float, size: float, align: str) -> str:
+def _frame_paragraph(runs: str, x: float, y: float, w: float, h: float, size: float, align: str,
+                     leading: float = LINE_FACTOR) -> str:
     jc = {"left": "left", "center": "center", "right": "right", "justify": "both"}.get(align, "left")
+    pad = 0.35 * size  # Luft oben für Akzente über Versalien (Ü, Ś, Ż)
+    y, h = y - pad, h + pad
     return (
         f'<w:p {nsdecls("w")}><w:pPr>'
         f'<w:framePr w:w="{round(w * TWIPS_PER_PT)}" w:h="{round(h * TWIPS_PER_PT)}" w:hRule="exact" w:wrap="around" '
         f'w:hAnchor="page" w:vAnchor="page" w:x="{round(x * TWIPS_PER_PT)}" w:y="{round(y * TWIPS_PER_PT)}"/>'
-        f'<w:spacing w:before="0" w:after="0" w:line="{round(size * LINE_FACTOR * TWIPS_PER_PT)}" w:lineRule="exact"/>'
+        f'<w:spacing w:before="{round(pad * TWIPS_PER_PT)}" w:after="0" w:line="{round(size * leading * TWIPS_PER_PT)}" w:lineRule="exact"/>'
         f'<w:ind w:left="0" w:right="0"/><w:jc w:val="{jc}"/></w:pPr>{runs}</w:p>'
     )
 
@@ -261,8 +282,10 @@ def build_docx(doc: LayoutDocument, out: Path, faksimile: bool = True, translate
                                                     _px_to_pt(page.height_px, page.dpi), pic_id, behind=True)))
         if faksimile and not translated:
             continue
+        boxes = expand_boxes(page.regions, page.height_px)
         for r in page.regions:
-            pic_id = _add_region(d, anchor_p, r, page, notes, style_ids, faksimile, translated, pic_id, work)
+            pic_id = _add_region(d, anchor_p, r, page, notes, style_ids, faksimile, translated, pic_id, work,
+                                 boxes.get(r.id))
 
     # Anhang
     last = d.add_section(WD_SECTION.NEW_PAGE)
@@ -276,6 +299,14 @@ def build_docx(doc: LayoutDocument, out: Path, faksimile: bool = True, translate
         p.add_run(HANDWRITING_WARNING)
     p = d.add_paragraph(style="Hinweis") if "Hinweis" in [s.name for s in d.styles] else d.add_paragraph()
     p.add_run(GENERAL_DISCLAIMER)
+    if notes.shortened:
+        d.add_heading("Vollständiger Text gekürzter Bereiche", level=2)
+        d.add_paragraph("Diese Bereiche passten auch bei engem Satz nicht vollständig auf ihre Seite und sind dort "
+                        "mit […] gekürzt.")
+        for page_label, md in notes.shortened:
+            p = d.add_paragraph()
+            p.add_run(f"S. {page_label}: ").bold = True
+            p.add_run(markup.unescape_md(markup.strip_marks(md)))
     if notes.items:
         d.add_heading("Anmerkungen", level=2)
         d.add_paragraph("Orange gepunktet = Lesung unsicher · blau = Bedeutungswandel · grün gestrichelt = Begriff der Zeit.")
@@ -300,9 +331,9 @@ def _section_last_paragraph(d, idx: int):
 
 
 def _add_region(d, anchor_p, r: LRegion, page: LPage, notes: Notes, style_ids, faksimile: bool, translated: bool,
-                pic_id: int, work: Path) -> int:
+                pic_id: int, work: Path, box_px=None) -> int:
     dpi = page.dpi
-    x0, y0, x1, y1 = r.box
+    x0, y0, x1, y1 = box_px or r.box
     x, y, w, h = _px_to_pt(x0, dpi), _px_to_pt(y0, dpi), _px_to_pt(x1 - x0, dpi), _px_to_pt(y1 - y0, dpi)
     if r.kind in IMAGE_KINDS:
         if not faksimile and r.image:
@@ -313,7 +344,6 @@ def _add_region(d, anchor_p, r: LRegion, page: LPage, notes: Notes, style_ids, f
     text = r.target_md if translated else r.source_md
     if not text.strip():
         return pic_id
-    w, h = w * 1.02, h * 1.06  # wie im PDF: Satzschrift läuft etwas weiter als die Scanschrift
     if r.kind == "tabelle":
         anchor_p.addprevious(parse_xml(_table_xml(text, x, y, w, h, notes, style_ids)))
         anchor_p.addprevious(parse_xml(f'<w:p {nsdecls("w")}><w:pPr><w:spacing w:before="0" w:after="0"/>'
@@ -321,10 +351,12 @@ def _add_region(d, anchor_p, r: LRegion, page: LPage, notes: Notes, style_ids, f
         return pic_id
     bold = r.bold or r.kind in HEADING_KINDS
     base = max(5.0, min(40.0, _px_to_pt(r.line_px or (y1 - y0), dpi) * 0.92))
-    _, plain = _runs_from_md(text, base, bold, Notes(), style_ids)  # nur für die Größenberechnung
-    size = fit_size(plain, w, h, base, bold)
-    runs, _ = _runs_from_md(text, size, bold, notes, style_ids)
-    anchor_p.addprevious(parse_xml(_frame_paragraph(runs, x, y, w, h, size, r.align)))
+    fit = fit_text(text, (x, y, w, h), base, bold, r.italic, r.spaced)
+    if fit.truncated:
+        notes.shortened.append((page.name, text))
+    st = RunStyle(bold, r.italic, r.color, round(fit.tracking * fit.size * TWIPS_PER_PT))
+    runs, _ = _runs_from_md(fit.text_md, fit.size, bold, notes, style_ids, st)
+    anchor_p.addprevious(parse_xml(_frame_paragraph(runs, x, y, w, h, fit.size, r.align, fit.leading)))
     return pic_id
 
 

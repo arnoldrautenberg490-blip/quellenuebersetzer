@@ -233,3 +233,26 @@ def test_distorted_archive_scan_is_straightened(tmp_path):
     h, w = fixed.shape[:2]
     assert abs(w / h - 1600 / 2300) < 0.05  # Seitenverhältnis wiederhergestellt
     assert after < before * 0.35, (before, after)  # Zeilen deutlich gerader
+
+
+def test_gridless_table_is_built_from_ocr_words_only(tmp_path, tess_root):
+    """Tabelle ohne Linien: Inhalte stammen ausschließlich aus der Texterkennung – nichts wird erfunden."""
+    import re as _re
+
+    from conftest import make_mixed_page
+    from quellenuebersetzer.pipeline.layout_reading import LayoutReader
+    from quellenuebersetzer.runtime.layout import LayoutDetector
+
+    det = LayoutDetector(Paths(tess_root))
+    if not det.available:
+        pytest.skip("Seitenaufbau-Modell nicht in der Testumgebung")
+    page = make_mixed_page(tmp_path / "misch.png")
+    reader = LayoutReader(SourceKind.DRUCK, Tesseract(Paths(tess_root)), ["pol"], None, None, detector=det,
+                          workdir=tmp_path)
+    lp = reader.read_layout([PageImage(1, page)])[0]
+    table = next(r for r in lp.regions if r.kind == "tabelle")
+    cells = [_re.sub(r"<[^>]+>", "", c).strip() for c in _re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", table.source_md)]
+    assert cells[:3] == ["Miejscowość", "Młyny", "Złote"], cells
+    assert "Bronowice" in cells and "Razem" in cells and "10" in cells
+    expected = {"Miejscowość", "Młyny", "Złote", "Bronowice", "3", "6", "Krowodrza", "2", "4", "Razem", "5", "10"}
+    assert {c for c in cells if c} <= expected  # keine zusätzlichen, erfundenen Inhalte

@@ -28,7 +28,10 @@ from quellenuebersetzer.pipeline.preprocess import (
     save_png,
 )
 from quellenuebersetzer.pipeline.reading import Item, PageReader, PageWork, _char_width, parse_table_output, segment_lines
-from quellenuebersetzer.pipeline.tables import detect_ruled_tables
+from quellenuebersetzer.pipeline.tables import detect_ruled_tables, table_from_words
+from quellenuebersetzer.pipeline.markup import strip_marks as markup_plain
+from quellenuebersetzer.pipeline.typography import bold_flags
+from quellenuebersetzer.pipeline.typography import measure as measure_style
 from quellenuebersetzer.profile import SourceKind
 from quellenuebersetzer.runtime.layout import LayoutDetector, Region
 from quellenuebersetzer.runtime.ollama import OllamaError
@@ -126,7 +129,9 @@ class LayoutReader(PageReader):
         work = LayoutWork(lpage.number)
         work.lpage = lpage
         data = np.fromfile(str(self.workdir / lpage.background), dtype=np.uint8)
-        gray = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+        color = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+        work.color = color
         enhanced = enhance(gray)
         binary = binarize(enhanced)
         h, w = gray.shape
@@ -196,6 +201,9 @@ class LayoutReader(PageReader):
         lr.align = _alignment(lines, lr.box)
         lr.bold = lr.kind in ("titel", "ueberschrift")
         lr.erase_boxes = [ln.bbox for ln in lines] or [lr.box]
+        if lines and getattr(work, "color", None) is not None:
+            style = measure_style(crop(work.color, lr.box, pad=0), crop(binary, lr.box, pad=0), lr.line_px)
+            lr.color, lr.italic, lr.spaced, lr.stroke = style.color, style.italic, style.spaced, style.stroke
 
     def _analyse_table(self, work: LayoutWork, lr: LRegion, gray, enhanced, binary) -> None:
         x0, y0, x1, y1 = lr.box
@@ -221,34 +229,31 @@ class LayoutReader(PageReader):
                 lr.erase_boxes.append(inner)
             work.region_tables[lr.id] = (t, cells_items)
         else:
-            from quellenuebersetzer.pipeline.preprocess import encode_png
-
-            work.gridless[lr.id] = encode_png(crop(enhanced, lr.box, pad=4), max_side=2000)
-            lr.erase_boxes = [lr.box]
+            # Tabelle ohne Linien: aus Tesseract-Wortpositionen aufbauen (nichts wird „erfunden“);
+            # das Lesemodell liest höchstens einzelne unsichere Zellen gegen.
+            sub = crop(binary, lr.box, pad=6)
+            ocr = self.tesseract.run_tsv(sub, self.langs, psm=6) if self.tesseract else OcrPage()
+            dx, dy = max(0, x0 - 6), max(0, y0 - 6)
+            lines = [_offset_line(ln, dx, dy) for ln in ocr.lines]
+            built = table_from_words(lines)
+            if built is None:
+                # keine Tabellenstruktur erkennbar → als normaler Text lesen (statt Inhalte zu raten)
+                lr.kind = "absatz"
+                self._analyse_text(work, lr, enhanced, binary)
+                return
+            t, cell_words = built
+            cells_items = []
+            for cell in t.cells:
+                words = cell_words.get((cell.row, cell.col))
+                if not words or not cell.bbox:
+                    continue
+                line = Line(words, cell.bbox, 0, 0)
+                need = self.strict or line.min_conf < fusion.CONF_SECOND
+                cells_items.append(Item(crop(enhanced, cell.bbox, pad=4), line=line, need_second=need,
+                                        bbox=cell.bbox, cell=cell))
+            lr.erase_boxes = [ln.bbox for ln in lines] or [lr.box]
+            work.region_tables[lr.id] = (t, cells_items)
         lr.line_px = 0.0
-
-    # ------------------------------------------------------------------ 2. Lesemodell (zusätzlich: Tabellen ohne Linien)
-    def _pass_glm(self, works) -> None:
-        super()._pass_glm(works)
-        if not self.glm:
-            return
-        for w in works:
-            for rid, png in w.gridless.items():
-                self.status(f"Seite {w.number}: Tabelle ohne Gitterlinien wird gelesen")
-                try:
-                    raw = self.glm.table_png(png)
-                except OllamaError:
-                    raw = ""
-                table = parse_table_output(raw) if raw else None
-                region = next(r for r in w.lpage.regions if r.id == rid)
-                if table:
-                    region.source_md = table.to_html()
-                else:
-                    region.kind = "abbildung"  # nicht lesbar → als Bild übernehmen
-                    name = f"abbildung-{rid}.png"
-                    (self.workdir / name).write_bytes(png)
-                    region.image = name
-                    region.erase_boxes = []
 
     # ------------------------------------------------------------------ 4. Zusammenführen je Bereich
     def _compose(self, w: LayoutWork):
@@ -274,6 +279,11 @@ class LayoutReader(PageReader):
             region.source_md = fusion.join_lines(lines_md)
         w.lpage.regions = [r for r in w.lpage.regions
                            if r.kind in IMAGE_KINDS or r.source_md.strip() or r.kind == "tabelle"]
+        # fett = deutlich kräftiger als der übliche Text dieser Seite (z. B. fette Zwischenüberschriften)
+        # nur Bereiche mit genug Text vergleichen (Seitenzahlen o. ä. geben kein verlässliches Strichbild)
+        texts = [r for r in w.lpage.regions if r.is_text and len(markup_plain(r.source_md)) >= 8]
+        for r, is_bold in zip(texts, bold_flags([r.stroke for r in texts])):
+            r.bold = r.bold or is_bold
         return w.lpage
 
     def _compose_hw_region(self, items: list[Item]) -> str:

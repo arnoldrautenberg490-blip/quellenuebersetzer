@@ -245,6 +245,7 @@ Answer only with JSON matching the schema."""
             problems.append(f"Every marked term needs an entry in \"terms\" (missing: {sorted(b_ids - term_ids)}).")
         if re.search(r"\([^)]*\)", text) and not re.search(r"\([^)]*\)", markup.strip_marks(seg.source)):
             problems.append("Do not add parenthetical explanations or original words to the translation; use \"terms\".")
+        problems.extend(_number_problems(seg, tagged.text, text))
         src_plain = markup.strip_marks(seg.source)
         src_len = len(src_plain)
         if _untranslated(src_plain, markup.strip_marks(markup.from_tags(text, {}))):
@@ -405,6 +406,33 @@ def _header_untranslated(source_html: str, translated_html: str) -> bool:
     src, dst = heads(source_html), heads(translated_html)
     wordy = [i for i, c in enumerate(src) if re.search(r"[^\W\d_]{4,}", c)]
     return len(wordy) >= 2 and len(src) == len(dst) and all(src[i] == dst[i] for i in wordy)
+
+
+_NUM_RE = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def _numbers(text: str) -> list[str]:
+    plain = re.sub(r"<[^>]+>", " ", text)
+    return sorted(n.replace(",", ".") for n in _NUM_RE.findall(plain))
+
+
+def _cells(html: str) -> list[str]:
+    return re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", html, re.S | re.I)
+
+
+def _number_problems(seg: Segment, source: str, translation: str) -> list[str]:
+    """Zahlen, Jahreszahlen und Beträge müssen exakt erhalten bleiben (Schutz gegen erfundene Werte)."""
+    if seg.kind == "tabelle":
+        src_cells, dst_cells = _cells(source), _cells(translation)
+        if len(src_cells) != len(dst_cells):
+            return []  # Strukturfehler wird gesondert gemeldet
+        bad = [i + 1 for i, (a, b) in enumerate(zip(src_cells, dst_cells)) if _numbers(a) != _numbers(b)]
+        if bad:
+            return [f"Numbers changed in table cells {bad[:6]}. Copy every number exactly as in the source cell."]
+        return []
+    if _numbers(source) != _numbers(translation):
+        return ["Numbers, years or amounts were changed, added or dropped. Copy every number exactly as in the source."]
+    return []
 
 
 def _untranslated(source: str, translation: str) -> bool:

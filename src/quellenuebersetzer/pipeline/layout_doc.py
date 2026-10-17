@@ -33,6 +33,10 @@ class LRegion:
     lines: int = 0
     align: str = "left"  # left | center | right | justify
     bold: bool = False
+    italic: bool = False
+    spaced: bool = False  # Sperrsatz
+    color: str = ""  # Schriftfarbe (Hex), leer = übliche dunkle Schrift
+    stroke: float = 0.0  # gemessene Strichstärke (für „fett“ im Vergleich zur Seite)
     image: str = ""  # Bildausschnitt (Abbildungen), Dateiname im Arbeitsordner
     erase_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)  # Textflächen fürs Faksimile
 
