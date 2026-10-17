@@ -6,6 +6,7 @@ folgen der Referenzumsetzung (Größe 800×800, Werte 0–1, Sigmoid, Top-K, Zei
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,8 @@ import numpy as np
 from quellenuebersetzer.config import Paths
 
 INPUT_SIZE = 800
+_RUN_LOCK = threading.Lock()
+_SESSION_LOCK = threading.Lock()
 MODEL_FILE = "pp_doclayoutv3.onnx"
 
 # Modellklassen → Bereichsarten des Programms
@@ -102,6 +105,10 @@ class LayoutDetector:
             return False
 
     def _get_session(self):
+        with _SESSION_LOCK:
+            return self._load_session()
+
+    def _load_session(self):
         if self._session is None:
             import onnxruntime as ort
 
@@ -127,9 +134,11 @@ class LayoutDetector:
         h, w = rgb.shape[:2]
         x = cv2.resize(rgb, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_CUBIC)
         x = (x.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
-        logits, boxes, order_logits = self._get_session().run(
-            ["logits", "pred_boxes", "order_logits"], {"pixel_values": x}
-        )
+        session = self._get_session()
+        with _RUN_LOCK:  # das Modell nutzt bereits alle Kerne – parallele Seiten warten hier kurz aufeinander
+            logits, boxes, order_logits = session.run(
+                ["logits", "pred_boxes", "order_logits"], {"pixel_values": x}
+            )
         return self._post(logits[0], boxes[0], order_logits[0], w, h)
 
     def _post(self, logits, pred_boxes, order_logits, w, h) -> list[Region]:

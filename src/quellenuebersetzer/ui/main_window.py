@@ -38,7 +38,7 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.tokens = tokens
         self.catalog = load_catalog()
-        self.service = OllamaService(paths, tuning=tuning_for(settings.gpu_name, settings.vram_gb))
+        self.service = OllamaService(paths, tuning=tuning_for(settings.gpu_name, settings.vram_gb, settings.translate_streams))
         self.bridge = ReviewBridge()
         self.bridge.request.connect(self._review)
         self.job_worker: JobWorker | None = None
@@ -146,10 +146,12 @@ class MainWindow(QMainWindow):
         self.settings.ocr_model = plan.tier.ocr
         self.settings.tier = plan.tier.key
         self.settings.mode = plan.mode
+        self.settings.translate_streams = 0  # nach jeder Einrichtung neu messen (andere Modelle oder Grafikkarte)
         gpu = self.system_info.best_gpu if getattr(self, "system_info", None) else None
         if gpu:
             self.settings.gpu_name, self.settings.vram_gb = gpu.name, self.system_info.usable_vram_gb
-        self.service.tuning = tuning_for(self.settings.gpu_name, self.settings.vram_gb)
+        self.service.tuning = tuning_for(self.settings.gpu_name, self.settings.vram_gb,
+                                         self.settings.translate_streams)
         self.settings.setup_complete = True
         self.settings.save(self.paths)
         if show_main:

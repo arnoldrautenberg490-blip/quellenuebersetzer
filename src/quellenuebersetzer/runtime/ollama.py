@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -36,6 +37,8 @@ class ChatResult:
     text: str
     logprobs: list[TokenLogprob]
 
+
+_STATS_LOCK = threading.Lock()  # Anfragen können parallel laufen (zwei Übersetzungsströme)
 
 class OllamaClient:
     def __init__(self, host: str = "127.0.0.1", port: int = OLLAMA_PORT, timeout: float = 900):
@@ -143,6 +146,12 @@ class OllamaClient:
             raise OllamaError(f"Modell {model}: {exc.code} {body}") from exc
         except urllib.error.URLError as exc:
             raise OllamaError(f"Die lokale Modell-Laufzeit antwortet nicht ({exc.reason}).") from exc
+        with _STATS_LOCK:
+            self._record(model, data, started)
+        lp = [TokenLogprob(t.get("token", ""), float(t.get("logprob", 0.0))) for t in data.get("logprobs") or []]
+        return ChatResult(text=data.get("message", {}).get("content", ""), logprobs=lp)
+
+    def _record(self, model: str, data: dict, started: float) -> None:
         st = self.stats.setdefault(model, {"anfragen": 0, "sekunden": 0.0, "eingabe": 0, "ausgabe": 0,
                                            "eingabe_s": 0.0, "ausgabe_s": 0.0, "laden_s": 0.0})
         st["anfragen"] += 1
@@ -152,21 +161,20 @@ class OllamaClient:
         st["eingabe_s"] += (data.get("prompt_eval_duration") or 0) / 1e9
         st["ausgabe_s"] += (data.get("eval_duration") or 0) / 1e9
         st["laden_s"] += (data.get("load_duration") or 0) / 1e9
-        lp = [TokenLogprob(t.get("token", ""), float(t.get("logprob", 0.0))) for t in data.get("logprobs") or []]
-        return ChatResult(text=data.get("message", {}).get("content", ""), logprobs=lp)
 
     @staticmethod
     def image_message(prompt: str, images: list[bytes], role: str = "user") -> dict:
         return {"role": role, "content": prompt, "images": [base64.b64encode(i).decode("ascii") for i in images]}
 
 
-def tuning_for(gpu_name: str, vram_gb: float) -> dict[str, str]:
+def tuning_for(gpu_name: str, vram_gb: float, streams: int = 0) -> dict[str, str]:
     """Laufzeit-Einstellungen passend zur Grafikkarte (automatisch, ohne Zutun des Nutzers).
 
     - RTX-Karten (Tensor-Kerne): Flash Attention und komprimierter Zwischenspeicher → mehr Kontext, weniger Speicher.
       Auf GTX-Karten bleibt beides aus (dort teils langsamer oder nicht stabil).
     - Ab 16 GB: Lese- und Übersetzungsmodell bleiben gleichzeitig geladen (kein Umladen).
     - Ab 12 GB: zwei Anfragen parallel.
+    - ``streams``: auf diesem Rechner gemessene Zahl gleichzeitiger Übersetzungen (0 = noch nicht gemessen).
     """
     t: dict[str, str] = {"OLLAMA_MAX_LOADED_MODELS": "1", "OLLAMA_NUM_PARALLEL": "1"}
     name = (gpu_name or "").upper()
@@ -177,6 +185,8 @@ def tuning_for(gpu_name: str, vram_gb: float) -> dict[str, str]:
         t["OLLAMA_MAX_LOADED_MODELS"] = "2"
     if vram_gb >= 12:
         t["OLLAMA_NUM_PARALLEL"] = "2"
+    if streams:
+        t["OLLAMA_NUM_PARALLEL"] = str(streams)
     return t
 
 

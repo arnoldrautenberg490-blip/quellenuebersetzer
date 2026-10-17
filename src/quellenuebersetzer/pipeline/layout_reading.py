@@ -84,6 +84,19 @@ def clean_line(line: Line) -> Line | None:
     return Line(words, bbox, line.block, line.par)
 
 
+def _reading_order_words(words: list[Word]) -> list[Word]:
+    """Wörter einer Zelle zeilenweise von oben nach unten, in der Zeile von links nach rechts."""
+    words = sorted(words, key=lambda w: (w.bbox[1] + w.bbox[3]) / 2)
+    rows: list[list[Word]] = []
+    for w in words:
+        h = max(1, w.bbox[3] - w.bbox[1])
+        if rows and abs((w.bbox[1] + w.bbox[3]) / 2 - (rows[-1][0].bbox[1] + rows[-1][0].bbox[3]) / 2) < 0.6 * h:
+            rows[-1].append(w)
+        else:
+            rows.append([w])
+    return [w for row in rows for w in sorted(row, key=lambda w: w.bbox[0])]
+
+
 def _ocr_score(lines: list[Line]) -> float:
     """Summe der Sicherheit echter Wörter – bevorzugt Varianten mit mehr *und* sichereren Wörtern."""
     return sum(w.conf for ln in lines for w in ln.words if re.search(r"\w", w.text))
@@ -149,11 +162,14 @@ def normalize_panel(color: np.ndarray, fill_hex: str) -> np.ndarray:
 
 
 class LayoutReader(PageReader):
-    def __init__(self, *args, detector: LayoutDetector, workdir: Path, **kwargs):
+    def __init__(self, *args, detector: LayoutDetector, workdir: Path, workers: int = 1, **kwargs):
         super().__init__(*args, **kwargs)
         self.detector = detector
         self.workdir = workdir
+        self.workers = max(1, workers)  # Seiten gleichzeitig (Prozessorkerne)
         self.geometry_reports: dict = {}
+        if self.workers > 1 and self.tesseract:
+            self.tesseract.threads = 1
 
     # ------------------------------------------------------------------ Phase 1: Seitenaufbau (ganzes Buch)
     def prepare_page(self, page: PageImage) -> tuple[int, int]:
@@ -330,17 +346,35 @@ class LayoutReader(PageReader):
         t = table_from_rules(lr.box, rules, tol=max(6, int(14 * scale)))
         mask = work.feats.line_mask if work.feats else None
         if t:
+            # die ganze Tabelle in EINEM Aufruf lesen (Linien sind schon entfernt) und die Wörter nach ihrer
+            # Lage den Zellen zuordnen – statt eines Programmstarts je Zelle
+            table_words = []
+            if self.tesseract:
+                table_lines = self._ocr_region(lr.box, binary, enhanced, 6, mask)
+                table_words = [wd for ln in table_lines for wd in ln.words]
+            by_cell: dict[int, list[Word]] = {}
+            for wd in table_words:
+                cx, cy = (wd.bbox[0] + wd.bbox[2]) / 2, (wd.bbox[1] + wd.bbox[3]) / 2
+                k = next((k for k, c in enumerate(t.cells)
+                          if c.bbox[0] <= cx < c.bbox[2] and c.bbox[1] <= cy < c.bbox[3]), None)
+                if k is not None:
+                    by_cell.setdefault(k, []).append(wd)
             cells_items = []
-            for cell in t.cells:
+            for k, cell in enumerate(t.cells):
                 inner = (cell.bbox[0] + 4, cell.bbox[1] + 4, cell.bbox[2] - 4, cell.bbox[3] - 4)
                 if inner[2] <= inner[0] or inner[3] <= inner[1]:
                     continue
                 c_bin = crop(binary, inner, pad=0)
                 if c_bin.size == 0 or (c_bin < 128).mean() < 0.003:
                     continue
-                single = (inner[3] - inner[1]) < max(60, 2.2 * self._line_h(c_bin))
-                lines = self._ocr_region(inner, binary, enhanced, 7 if single else 6, mask) if self.tesseract else []
-                words = [wd for ln in lines for wd in ln.words]
+                words = by_cell.get(k)
+                if words:
+                    words = _reading_order_words(words)
+                elif self.tesseract:
+                    # Schrift in der Zelle, aber kein Wort zugeordnet → Zelle einzeln nachlesen (Vollständigkeit)
+                    single = (inner[3] - inner[1]) < max(60, 2.2 * self._line_h(c_bin))
+                    lines = self._ocr_region(inner, binary, enhanced, 7 if single else 6, mask)
+                    words = [wd for ln in lines for wd in ln.words]
                 line = Line(words, inner, 0, 0) if words else None
                 need = line is None or self.strict or line.min_conf < fusion.CONF_SECOND or (
                     any(ch.isdigit() for ch in line.text) and line.min_conf < fusion.CONF_OK)
@@ -506,18 +540,35 @@ class LayoutReader(PageReader):
             out.append(md)
         return fusion.join_lines(out)
 
-    def read_regions(self, lpages: list[LPage]) -> list[LPage]:
-        """Phase 2 für bereits erkannte Seiten: Text je Bereich lesen (in Durchgängen je Modell)."""
-        works = [self._analyse(lp) for lp in lpages]
+    def analyse_pages(self, lpages: list[LPage]) -> list[LayoutWork]:
+        """Phase 2a (Prozessor, mehrere Seiten gleichzeitig): Bereiche vorbereiten und mit Tesseract lesen."""
+        from quellenuebersetzer.pipeline.parallel import pmap
+
+        return list(pmap(self._analyse_light, lpages, self.workers))
+
+    def _analyse_light(self, lpage: LPage) -> LayoutWork:
+        work = self._analyse(lpage)
+        # große Bildspeicher sofort freigeben – nur Zeilenausschnitte und Linien werden weiter gebraucht
+        work.color = work.binary = work.enhanced = None
+        if work.feats is not None:
+            work.feats.line_mask = None
+        return work
+
+    def finish_pages(self, works: list[LayoutWork]) -> list[LPage]:
+        """Phase 2b (Grafikkarte): Zweitlesung unsicherer Stellen, dann Zusammenführen je Bereich."""
         if self.kind == SourceKind.HANDSCHRIFT:
             self._pass_handwriting_first(works)
         self._pass_glm(works)
         out = [self._compose(w) for w in works]
-        for w in works:  # große Bildspeicher freigeben (Buchmodus)
-            w.color = w.binary = w.enhanced = w.feats = None
+        for w in works:
+            w.feats = None
         for lp in out:
             lp.read = True
         return out
+
+    def read_regions(self, lpages: list[LPage]) -> list[LPage]:
+        """Phase 2 für bereits erkannte Seiten: Text je Bereich lesen (in Durchgängen je Modell)."""
+        return self.finish_pages(self.analyse_pages(lpages))
 
     def read_layout(self, pages: list[PageImage]) -> list[LPage]:
         """Beide Phasen für wenige Seiten am Stück (z. B. Tests)."""

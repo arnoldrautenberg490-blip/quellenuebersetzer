@@ -123,7 +123,8 @@ class Settings:
     theme: str = "system"  # system | hell | dunkel
     setup_complete: bool = False
     main_model: str = ""
-    draft_model: str = ""  # nur Modus „Gründlich“ (gestaffelt): schnelles Modell für den ersten Durchgang
+    draft_model: str = ""
+    translate_streams: int = 0  # gemessene Zahl gleichzeitiger Übersetzungen (0 = noch nicht gemessen)  # nur Modus „Gründlich“ (gestaffelt): schnelles Modell für den ersten Durchgang
     ocr_model: str = ""
     tier: str = ""
     mode: str = "schnell"  # schnell | gruendlich

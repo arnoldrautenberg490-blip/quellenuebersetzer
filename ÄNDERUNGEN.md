@@ -154,6 +154,23 @@ Tabellenzeile galt immer als Kopf, Randtext wurde nach Lage zur „Randnotiz“,
 - **Verworfen nach Messung:** gebündelte Zweitlesung (auf dem Prozessor langsamer: 60 s statt 32 s) und
   Erläuterungen direkt aus dem Wörterbuch (falsche Wortbedeutungen, nicht deutsch, kein Zeitgewinn).
 
+## Beschleunigung für ganze Bücher (17.10.2026)
+- **Mehrere Prozessorkerne:** Entzerren, Seitenaufbau und Texterkennung laufen seitenweise parallel
+  (etwa die Hälfte der logischen Kerne, höchstens 6).
+- **Weniger Rechenaufwand beim Lesen:** kantenerhaltende Glättung statt der sehr teuren Rauschunterdrückung
+  (3,4 s je Seite) und ganze Tabellen in einem Tesseract-Aufruf statt einem Aufruf je Zelle; Zellen ohne
+  zugeordnetes Wort werden einzeln nachgelesen. Gleiche Lesequalität an der Testsammlung
+  (Wörter 99,9 %, Tabellenzellen 99,4 %).
+  Gemessen (10 Seiten, Entwicklungsrechner): Seitenaufbau + Texterkennung **94 s → 25 s**.
+- **Lesen und Übersetzen überlappt:** Nach dem Seitenaufbau des ganzen Buchs liest der Prozessor Block für
+  Block (20 Seiten) voraus, während die Grafikkarte den vorigen Block zweitliest und übersetzt.
+  Mit eingeschalteter Prüfung der Umschrift bleibt der bisherige Ablauf (dort muss erst alles gelesen sein).
+- **Zwei Übersetzungen gleichzeitig**, nur wenn auf dem jeweiligen Rechner gemessen schneller (Schwelle: höchstens
+  80 % der Zeit): einmalige automatische Messung beim ersten Buch ab 20 Seiten (Ergebnis gespeichert, nach jeder
+  Neueinrichtung neu) und im Leistungstest. Das Buch wird dann in zwei zusammenhängende Hälften je Block geteilt.
+  Auf dem Entwicklungsrechner ohne Grafikkarte: kein Gewinn (17,8 s gegen 16,1 s) → bleibt aus.
+- Zeitprotokoll nennt jetzt Kerne, Überlappung und Zahl gleichzeitiger Übersetzungen.
+
 ## Fehlerbehebung: Speicher nach dem Beenden der Modell-Laufzeit (17.10.2026)
 - Beim Beenden blieben die Modellprozesse (`llama-server`) als Waisen zurück und belegten mehrere Gigabyte
   Arbeitsspeicher – nach einigen Läufen konnte der Speicher volllaufen (Verlangsamung, Abbrüche).
@@ -161,7 +178,7 @@ Tabellenzeile galt immer als Kopf, Randtext wurde nach Lage zur „Randnotiz“,
   (nur programmeigene, am Installationspfad erkannt).
 
 ## Qualitätssicherung
-- 95 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
+- 99 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
   darunter Ende-zu-Ende-Qualitätsschranken der Layouterkennung an schwierigen Seiten der Testsammlung.
 - Tests mit echten Modellen auf dem Entwicklungsrechner (ohne Grafikkarte): Gemma 4 E2B und 12B.
 - Setup.exe mehrfach installiert, gestartet und rückstandslos deinstalliert.

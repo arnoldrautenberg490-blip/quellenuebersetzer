@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import queue
 import shutil
+import threading
 import time
 import traceback
 import sys
@@ -22,8 +24,9 @@ from quellenuebersetzer.pipeline.document import Block, SourceDocument
 from quellenuebersetzer.pipeline.export import FORMATS, DocMeta, Exporter, ExportError, build_document
 from quellenuebersetzer.pipeline.layout_doc import LayoutDocument
 from quellenuebersetzer.pipeline.layout_reading import LayoutReader
-from quellenuebersetzer.pipeline import pruefbericht
-from quellenuebersetzer.pipeline.layout_translate import translate_layout
+from quellenuebersetzer.pipeline import pruefbericht, tempo
+from quellenuebersetzer.pipeline.layout_translate import LayoutTranslator
+from quellenuebersetzer.pipeline.parallel import cpu_workers, pmap
 from quellenuebersetzer.pipeline.pagegeom import common_size
 from quellenuebersetzer.pipeline.lexicon import Glossary, Lexicon
 from quellenuebersetzer.pipeline.readers import GlmOcr, VisionJudge
@@ -35,6 +38,8 @@ from quellenuebersetzer.runtime.ollama import OllamaClient, OllamaService
 from quellenuebersetzer.runtime.tesseract import Tesseract
 
 PAGE_BATCH = 12  # Seiten je Durchgang (begrenzt den Speicherbedarf bei großen Bänden)
+OVERLAP_BLOCK = 20  # Seiten je Block beim überlappten Lesen und Übersetzen
+STREAM_TEST_PAGES = 20  # ab dieser Seitenzahl wird einmalig gemessen, ob zwei Übersetzungen gleichzeitig lohnen
 
 
 @dataclass
@@ -336,11 +341,29 @@ class Job:
             extra_hints=self.lang.prompt.get("historische_hinweise", []), status=lambda m: step(m),
         )
 
+    def _translation_streams(self, model: str, n_pages: int, step) -> int:
+        """Zwei Übersetzungen gleichzeitig nur, wenn auf diesem Rechner gemessen schneller (einmalig, ohne Klick)."""
+        streams = self.settings.translate_streams
+        if streams == 0 and self.service is not None and n_pages >= STREAM_TEST_PAGES:
+            step("Einmalige Messung: Lohnen zwei Übersetzungen gleichzeitig auf dieser Grafikkarte?")
+            try:
+                streams, seq, par = tempo.measure_streams(self.service, self.client, model)
+            except Exception as exc:  # noqa: BLE001 – Messung ist nur eine Optimierung
+                self._log_error(exc)
+                return 1
+            self.settings.translate_streams = streams
+            self.settings.save(self.paths)
+            how = "zwei Übersetzungen gleichzeitig" if streams == 2 else "eine Übersetzung nach der anderen"
+            self.emit(Event("hinweis", f"Messung abgeschlossen (nacheinander {seq:.0f} s, gleichzeitig {par:.0f} s): "
+                                       f"künftig {how}."))
+        return max(1, streams)
+
     def _process_layout(self, src: Path, ing, kind: SourceKind, lexicon: Lexicon, glossary: Glossary, step,
                         job_cache: Path, index: int, total: int) -> FileResult:
         tess, glm, judge = self._readers()
         reader = LayoutReader(kind, tess, self._tess_langs(kind), glm, judge, self.period,
-                              status=lambda m: step(m), detector=LayoutDetector(self.paths), workdir=job_cache)
+                              status=lambda m: step(m), detector=LayoutDetector(self.paths), workdir=job_cache,
+                              workers=cpu_workers())
         state = job_cache / "stand.json"
         ldoc = LayoutDocument(str(src), src.stem, kind.value, str(job_cache))
         if state.exists():
@@ -364,12 +387,13 @@ class Job:
         for p in ldoc.pages:  # beim Fortsetzen: bekannte Seiten sofort zeigen
             self._preview_layout(ldoc, p, preview_dir, src, index, n_total)
         todo = [p for p in ing.pages if p.number not in known]
-        # 1a: alle Seiten entzerren (Seite finden, Perspektive, Schräglage, Wölbung) …
+        # 1a: alle Seiten entzerren (Seite finden, Perspektive, Schräglage, Wölbung) – mehrere Seiten gleichzeitig …
+        workers = reader.workers
         sizes = []
-        for i, page in enumerate(todo, start=1):
-            step(f"Phase 1 von 3 – Seiten entzerren: Seite {page.name} ({i} von {len(todo)})",
-                 0.04 * i / max(1, len(todo)))
-            sizes.append(reader.prepare_page(page))
+        for i, size in enumerate(pmap(reader.prepare_page, todo, workers), start=1):
+            self._check()
+            step(f"Phase 1 von 3 – Seiten entzerren: {i} von {len(todo)}", 0.04 * i / max(1, len(todo)))
+            sizes.append(size)
         # … dann ein gemeinsames Normalformat für das ganze Dokument festlegen
         if ldoc.target_size is None and not known:
             target = common_size(sizes)
@@ -382,70 +406,38 @@ class Job:
             self.emit(Event("hinweis", f"{fixed} Seite(n) entzerrt (Rand, Schräglage, Wölbung bis {worst:.0f} Pixel)"
                                        + (f"; einheitliches Seitenformat {target_size[0]}×{target_size[1]} Pixel."
                                           if target_size else "."), src.name, index, total))
-        # 1b: Seitenaufbau auf den aufbereiteten Seiten erkennen
-        for i, page in enumerate(todo, start=1):
-            step(f"Phase 1 von 3 – Seitenaufbau: Seite {page.name} ({len(known) + i} von {n_total})",
+        # 1b: Seitenaufbau auf den aufbereiteten Seiten erkennen (mehrere Seiten gleichzeitig)
+        for i, lp in enumerate(pmap(lambda pg: reader.detect_page(pg, target_size), todo, workers), start=1):
+            self._check()
+            step(f"Phase 1 von 3 – Seitenaufbau: Seite {lp.name} ({len(known) + i} von {n_total})",
                  0.04 + 0.04 * (len(known) + i) / max(1, n_total))
-            lp = reader.detect_page(page, target_size)
             ldoc.pages.append(lp)
             ldoc.pages.sort(key=lambda x: x.number)
             if i % 5 == 0 or i == len(todo):
                 ldoc.save(state)
             self._preview_layout(ldoc, lp, preview_dir, src, index, n_total)
         self.phase_times["aufbau"] = time.time() - t_layout
+        self.phase_times["kerne"] = workers
         self.emit(Event("hinweis", f"Seitenaufbau erkannt: {layout_render.layout_summary(ldoc)}.", src.name, index, total))
 
-        # ---- Phase 2: Texterkennung je Bereich (in Blöcken, je Block ein Durchgang pro Modell)
-        t_read = time.time()
-        unread = [p for p in ldoc.pages if not p.read]
-        for p in ldoc.pages:
-            if p.read:
-                self._preview_read(ldoc, p, preview_dir, src, index)
-        for start in range(0, len(unread), PAGE_BATCH):
-            batch = unread[start:start + PAGE_BATCH]
-            done_before = n_total - len(unread) + start
-            step(f"Phase 2 von 3 – Texterkennung: Seiten {batch[0].name}–{batch[-1].name} von {n_total}",
-                 0.08 + 0.42 * done_before / max(1, n_total))
-            reader.read_regions(batch)
-            ldoc.save(state)
-            for p in batch:
-                self._preview_read(ldoc, p, preview_dir, src, index)
-        self.phase_times["lesen"] = time.time() - t_read
-        self.phase_times["seiten"] = len(unread)
-        ldoc.readers = [r for r in (tess and "Tesseract", glm and glm.model, judge and judge.model) if r]
-        if not any(r.source_md.strip() for p in ldoc.pages for r in p.regions):
-            return FileResult(src, False, message="In der Datei wurde kein Text gefunden.")
-
-        already_translating = any(r.target_md for p in ldoc.pages for r in p.regions)
-        if self.review and self.options.review and not already_translating:
-            step("Warte auf Prüfung der Umschrift")
-            md_ids = ldoc.flow_markdown(with_ids=True)
-            preview = SourceDocument(src, src.stem, "scan", kind.value, [], list(ing.pages))
-            reviewed = self.review(preview, md_ids)
-            if reviewed is None:
-                return FileResult(src, False, message="Übersprungen")
-            if reviewed != md_ids:
-                ldoc.apply_reviewed(reviewed)
-                self._save_correction(preview, reviewed)
-            ldoc.save(state)
-
-        staged = self.settings.mode == "gruendlich" and bool(self.settings.draft_model)             and self.settings.draft_model != self.settings.main_model
+        # ---- Übersetzer vorbereiten
+        staged = (self.settings.mode == "gruendlich" and bool(self.settings.draft_model)
+                  and self.settings.draft_model != self.settings.main_model)
         if staged:
             # gestaffelt gründlich: schnelles Modell für alles, großes Modell nur für schwierige Abschnitte
             translator = self._translator(lexicon, glossary, step, self.settings.draft_model)
             refiner = self._translator(lexicon, glossary, step, self.settings.main_model)
         else:
             translator, refiner = self._translator(lexicon, glossary, step), None
-        step("Phase 3 von 3 – Übersetzung beginnt", 0.5)
-
-        def progress(i: int, n: int) -> None:
-            if i % 10 == 0:
-                ldoc.save(state)  # Zwischenstand für das Fortsetzen
-            step(f"Phase 3 von 3 – Übersetzung: Abschnitt {i} von {n}", 0.5 + 0.42 * i / max(1, n))
 
         typst = self.paths.runtime / "typst" / "typst.exe"
         n_pages = len(ldoc.pages)
         preview_failed = []
+        save_lock = threading.Lock()
+
+        def save() -> None:
+            with save_lock:
+                ldoc.save(state)
 
         def page_done(page) -> None:
             """Fertig übersetzte Seite sofort als Vorschau anzeigen (blätterbar im Hauptfenster)."""
@@ -464,16 +456,140 @@ class Job:
             self.emit(Event("seite_fertig", page.name, src.name, page.number, n_pages,
                             outputs=[original, translated]))
 
-        t_tr = time.time()
-        translate_layout(ldoc, translator, progress=progress, on_page_done=page_done, refine=refiner)
-        self.phase_times["uebersetzen"] = time.time() - t_tr
+        def tr_progress(label: str, base: float, span: float, where: str = ""):
+            def progress(i: int, n: int) -> None:
+                if i % 10 == 0:
+                    save()  # Zwischenstand für das Fortsetzen
+                step(f"{label}: Abschnitt {i} von {n}{where}", base + span * i / max(1, n))
+            return progress
+
+        streams = self._translation_streams(translator.model, n_pages, step)
+        lt = LayoutTranslator(ldoc, translator, on_page_done=page_done, streams=streams)
+        already_translating = any(r.target_md for p in ldoc.pages for r in p.regions)
+        review = bool(self.review and self.options.review) and not already_translating
+        unread = [p for p in ldoc.pages if not p.read]
+        for p in ldoc.pages:
+            if p.read:
+                self._preview_read(ldoc, p, preview_dir, src, index)
+        t_read = time.time()
+        read_seconds = translate_seconds = 0.0
+
+        if review:
+            # ---- Phase 2 komplett, dann Prüfung der Umschrift, dann Phase 3 (Prüfung braucht den ganzen Text)
+            for start in range(0, len(unread), PAGE_BATCH):
+                self._check()
+                batch = unread[start:start + PAGE_BATCH]
+                done_before = n_total - len(unread) + start
+                step(f"Phase 2 von 3 – Texterkennung: Seiten {batch[0].name}–{batch[-1].name} von {n_total}",
+                     0.08 + 0.42 * done_before / max(1, n_total))
+                reader.read_regions(batch)
+                save()
+                for p in batch:
+                    self._preview_read(ldoc, p, preview_dir, src, index)
+            read_seconds = time.time() - t_read
+            if not any(r.source_md.strip() for p in ldoc.pages for r in p.regions):
+                return FileResult(src, False, message="In der Datei wurde kein Text gefunden.")
+            step("Warte auf Prüfung der Umschrift")
+            md_ids = ldoc.flow_markdown(with_ids=True)
+            preview = SourceDocument(src, src.stem, "scan", kind.value, [], list(ing.pages))
+            reviewed = self.review(preview, md_ids)
+            if reviewed is None:
+                return FileResult(src, False, message="Übersprungen")
+            if reviewed != md_ids:
+                ldoc.apply_reviewed(reviewed)
+                self._save_correction(preview, reviewed)
+            save()
+            t0 = time.time()
+            lt.translate_pages(ldoc.pages, tr_progress("Phase 3 von 3 – Übersetzung", 0.5, 0.42))
+            translate_seconds = time.time() - t0
+        else:
+            # ---- Phase 2 und 3 überlappt: Der Prozessor liest Block für Block voraus, während die Grafikkarte
+            # den vorigen Block zweitliest und übersetzt (der Seitenaufbau des ganzen Buchs steht schon fest).
+            t0 = time.time()
+            lt.translate_pages([p for p in ldoc.pages if p.read],
+                               tr_progress("Übersetzung bereits gelesener Seiten", 0.08, 0.02))
+            translate_seconds += time.time() - t0
+            blocks = [unread[i:i + OVERLAP_BLOCK] for i in range(0, len(unread), OVERLAP_BLOCK)]
+            analysed: queue.Queue = queue.Queue(maxsize=1)
+            stop = threading.Event()
+            analyse_seconds = [0.0]
+
+            def hand_over(item) -> bool:
+                while not stop.is_set():
+                    try:
+                        analysed.put(item, timeout=0.5)
+                        return True
+                    except queue.Full:
+                        continue
+                return False
+
+            def produce() -> None:
+                try:
+                    for block in blocks:
+                        t = time.time()
+                        works = reader.analyse_pages(block)
+                        analyse_seconds[0] += time.time() - t
+                        if not hand_over((block, works)):
+                            return
+                    hand_over((None, None))
+                except BaseException as exc:  # noqa: BLE001 – im Hauptablauf melden
+                    hand_over((exc, None))
+
+            producer = threading.Thread(target=produce, name="Texterkennung", daemon=True)
+            producer.start()
+            pages_done = n_total - len(unread)
+            try:
+                while True:
+                    try:
+                        block, works = analysed.get(timeout=1.0)
+                    except queue.Empty:
+                        self._check()
+                        continue
+                    if block is None:
+                        break
+                    if isinstance(block, BaseException):
+                        raise block
+                    self._check()
+                    step(f"Phase 2 von 3 – Zweitlesung: Seiten {block[0].name}–{block[-1].name} von {n_total}",
+                         0.08 + 0.84 * pages_done / max(1, n_total))
+                    t = time.time()
+                    reader.finish_pages(works)
+                    read_seconds += time.time() - t
+                    save()
+                    for p in block:
+                        self._preview_read(ldoc, p, preview_dir, src, index)
+                    base = 0.08 + 0.84 * pages_done / max(1, n_total)
+                    t = time.time()
+                    lt.translate_pages(block, tr_progress(
+                        "Phase 3 von 3 – Übersetzung", base, 0.84 * len(block) / max(1, n_total),
+                        f" (Seiten {block[0].name}–{block[-1].name} von {n_total})"))
+                    translate_seconds += time.time() - t
+                    pages_done += len(block)
+                    save()
+            finally:
+                stop.set()
+                producer.join(timeout=60)
+            read_seconds += analyse_seconds[0]
+            self.phase_times["ueberlappt"] = True
+            if not any(r.source_md.strip() for p in ldoc.pages for r in p.regions):
+                return FileResult(src, False, message="In der Datei wurde kein Text gefunden.")
+        self.phase_times["lesen"] = read_seconds
+        self.phase_times["seiten"] = len(unread)
+        self.phase_times["lesen_und_uebersetzen"] = time.time() - t_read
+        ldoc.readers = [r for r in (tess and "Tesseract", glm and glm.model, judge and judge.model) if r]
+
+        if refiner:
+            t0 = time.time()
+            self.phase_times["ueberarbeitet"] = lt.refine(
+                refiner, tr_progress("Überarbeitung schwieriger Abschnitte (großes Modell)", 0.9, 0.02))
+            translate_seconds += time.time() - t0
+        self.phase_times["uebersetzen"] = translate_seconds
+        self.phase_times["stroeme"] = streams
         self.phase_times["bereiche"] = sum(1 for p in ldoc.pages for r in p.regions if r.translatable)
         self.phase_times["wiederholungen"] = translator.stats.retries + (refiner.stats.retries if refiner else 0)
         self.phase_times["reparaturen"] = translator.stats.repairs + (refiner.stats.repairs if refiner else 0)
-        if refiner:
-            self.phase_times["ueberarbeitet"] = refiner.stats.segments
         pruefbericht.check_translation(ldoc)
-        ldoc.save(state)
+        save()
         if translator.stats.fallbacks:
             self.emit(Event("hinweis", f"{translator.stats.fallbacks} Bereich(e) mit vereinfachter Übersetzung "
                                        "– im Dokument gekennzeichnet.", src.name, index, total))
@@ -593,7 +709,11 @@ class Job:
                      f" | Schrift {self.options.kind.value} | Modus {self.settings.mode} | gesamt {seconds:.0f} s"]
             pt = getattr(self, "phase_times", {})
             if pt.get("aufbau") is not None:
-                lines.append(f"  Seitenaufbau: {pt['aufbau']:.0f} s")
+                lines.append(f"  Seitenaufbau: {pt['aufbau']:.0f} s ({pt.get('kerne', 1)} Seiten gleichzeitig)")
+            if pt.get("lesen_und_uebersetzen") is not None:
+                lines.append(f"  Lesen und Übersetzen zusammen: {pt['lesen_und_uebersetzen']:.0f} s"
+                             + (" (überlappt)" if pt.get("ueberlappt") else " (nacheinander)")
+                             + f", {pt.get('stroeme', 1)} Übersetzung(en) gleichzeitig")
             if pt.get("seiten"):
                 lines.append(f"  Lesen: {pt.get('lesen', 0):.0f} s für {pt['seiten']} Seite(n) "
                              f"= {pt.get('lesen', 0) / pt['seiten']:.0f} s/Seite")

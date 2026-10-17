@@ -56,6 +56,7 @@ class Tesseract:
     def __init__(self, paths: Paths):
         self.exe = paths.runtime / "tesseract" / "tesseract.exe"
         self.tessdata = paths.runtime / "tesseract" / "tessdata"
+        self.threads = 4  # bei mehreren Seiten gleichzeitig 1 je Aufruf (sonst bremsen sich die Aufrufe gegenseitig)
 
     @property
     def available(self) -> bool:
@@ -73,7 +74,7 @@ class Tesseract:
         langs = [l for l in langs if (self.tessdata / f"{l}.traineddata").exists()] or ["pol"]
         from quellenuebersetzer.netguard import offline_env
 
-        env = {**offline_env(), "TESSDATA_PREFIX": str(self.tessdata), "OMP_THREAD_LIMIT": "4"}
+        env = {**offline_env(), "TESSDATA_PREFIX": str(self.tessdata), "OMP_THREAD_LIMIT": str(self.threads)}
         cmd = [str(self.exe), "stdin", "stdout", "-l", "+".join(langs), "--psm", str(psm),
                "-c", "preserve_interword_spaces=1", "tsv"]
         r = subprocess.run(cmd, input=buf.tobytes(), capture_output=True, env=env, creationflags=_NO_WINDOW, timeout=600)

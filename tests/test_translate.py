@@ -152,9 +152,9 @@ def test_pages_are_reported_in_order_when_finished():
     from quellenuebersetzer.pipeline.layout_doc import LayoutDocument, LPage, LRegion
     from quellenuebersetzer.pipeline.layout_translate import translate_layout
 
-    pages = [LPage(n, 100, 100, 300, "bg", [LRegion(f"s{n}b1", "absatz", (0, 0, 1, 1), 0, f"Tekst strony {n}.")])
+    pages = [LPage(n, 100, 100, 300, "bg", [LRegion(f"s{n}b1", "absatz", (0, 0, 1, 1), 0, f"Tekst strony {n}.")], read=True)
              for n in (1, 2, 3)]
-    pages.append(LPage(4, 100, 100, 300, "bg", [LRegion("s4b1", "abbildung", (0, 0, 1, 1), 0)]))
+    pages.append(LPage(4, 100, 100, 300, "bg", [LRegion("s4b1", "abbildung", (0, 0, 1, 1), 0)], read=True))
     doc = LayoutDocument("x", "x", "druck", ".", pages)
     c = ScriptedClient([{"translation": f"Text der Seite {n}.", "readings": [], "terms": []} for n in (1, 2, 3)])
     done = []

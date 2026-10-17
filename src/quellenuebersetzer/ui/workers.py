@@ -191,6 +191,22 @@ class BenchmarkWorker(QThread):
             f"Markierte unsichere Stellen: {res.marks}",
             f"Modelle: {self.settings.main_model}, {self.settings.ocr_model}",
         ]
+        # Zwei Übersetzungen gleichzeitig? Auf dieser Grafikkarte messen und das Ergebnis übernehmen
+        from quellenuebersetzer.pipeline import tempo
+
+        self.status.emit("Messung: zwei Übersetzungen gleichzeitig …")
+        try:
+            model = self.settings.draft_model or self.settings.main_model
+            streams, seq, par = tempo.measure_streams(self.service, self.service.client, model)
+            self.settings.translate_streams = streams
+            self.settings.save(self.paths)
+            lines.append(f"Zwei Übersetzungen gleichzeitig: nacheinander {seq:.0f} s, gleichzeitig {par:.0f} s → "
+                         + ("wird genutzt" if streams == 2 else "lohnt sich auf dieser Grafikkarte nicht"))
+        except Exception as exc:  # noqa: BLE001 – Messung ist nur eine Optimierung
+            lines.append(f"Messung „zwei Übersetzungen gleichzeitig“ nicht möglich: {exc}")
+        from quellenuebersetzer.pipeline.parallel import cpu_workers
+
+        lines.append(f"Seiten gleichzeitig beim Lesen (Prozessorkerne): {cpu_workers()}")
         self.result.emit("\n".join(lines), str(out))
 
 
