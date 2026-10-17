@@ -131,7 +131,10 @@ def test_neusatz_draws_boxes_with_fill_and_frame(tmp_path):
                                        ("zweispaltig", True), ("tabelle_linien", False),
                                        ("spaltenuebergreifend", True), ("farbige_bloecke", False),
                                        ("tabelle_zebra", True), ("tabelle_mehrzeilig", True),
-                                       ("tabelle_spalten", True), ("tabelle_im_kasten", False)])
+                                       ("tabelle_spalten", True), ("tabelle_im_kasten", False),
+                                       ("farbflaechen", False), ("farbflaechen", True),
+                                       ("stadtplan", False), ("stadtplan", True),
+                                       ("heller_plan", True), ("seitenleiste", False), ("seitenleiste", True)])
 def test_quality_gate_on_hard_pages(tmp_path, tess_root, name, aged):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
     from layout_messen import measure_page
@@ -149,7 +152,7 @@ def test_quality_gate_on_hard_pages(tmp_path, tess_root, name, aged):
     page = sammlung.build(name, aged)
     cv2.imencode(".png", _bgr(page))[1].tofile(str(tmp_path / "hintergrund-0001.png"))
     reader = LayoutReader(SourceKind.DRUCK, Tesseract(Paths(tess_root)), ["pol"], None, None, detector=det,
-                          workdir=tmp_path)
+                          workdir=tmp_path, extra_scripts=["heb", "yid", "rus"])
     lp = reader.read_regions([reader.detect_page(PageImage(1, tmp_path / "hintergrund-0001.png"))])[0]
     m = measure_page(page, lp, 0.0)
     assert m["bloecke"][0] == m["bloecke"][1]
@@ -282,3 +285,256 @@ def test_model_table_covering_a_whole_box_yields_to_the_inner_table():
     regions = [whole, inner]
     _reconcile_tables(regions, {"k1": Panel((260, 648, 2232, 1501), "#ead9b3", "#ae9972", "solid", 6)}, 3508)
     assert regions == [inner]
+
+
+@pytest.mark.parametrize("aged", [False, True])
+def test_color_blocks_of_any_shape_and_position_are_found(aged):
+    """Randabfallendes Band, aneinanderstoßende Blöcke (Rot | Grün), abgerundeter Block, Block bis zur Seitenecke."""
+    page = sammlung.build("farbflaechen", aged)
+    panels = features.analyse(_bgr(page)).panels
+    truth = [b for b in page.blocks if b.kind == "kasten"]
+
+    def iou(a, b):
+        ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+        iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+        inter = ix * iy
+        return inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter)
+
+    for t in truth:
+        best = max(panels, key=lambda p: iou(p.box, t.box))
+        assert iou(best.box, t.box) > 0.85, t.flow
+        assert best.dark == (t.flow in ("band", "rot", "gruen", "ecke")), t.flow  # helle Schrift gemessen
+    # kein Rechteck, das Rot und Grün zusammenfasst
+    assert not any(p.box[0] < 1000 and p.box[2] > 1500 and 700 < p.box[1] < 800 for p in panels)
+
+
+def test_white_text_colour_is_measured_from_letter_cores():
+    from quellenuebersetzer.pipeline.typography import ink_color
+
+    img = np.zeros((60, 200, 3), np.uint8)
+    img[:] = (45, 50, 190)  # Rot (BGR)
+    ink = np.zeros((60, 200), np.uint8)
+    for x in range(10, 190, 12):
+        img[15:45, x:x + 4] = (255, 255, 255)  # weiße Striche
+        img[15:45, x + 4:x + 6] = (150, 150, 220)  # vermischte Kantenpixel
+        ink[15:45, x:x + 6] = 1
+    col = ink_color(img, ink)
+    r, g, b = (int(col[i:i + 2], 16) for i in (1, 3, 5))
+    assert min(r, g, b) > 230  # weiß, nicht rosa
+
+
+@pytest.mark.parametrize("aged", [False, True])
+def test_map_stays_an_image_even_if_the_model_calls_it_text(aged):
+    """Stadtplan mit Straßennamen: auch wenn das Modell ihn als Absatz meldet, bleibt er Abbildung;
+    ein Park (Farbfläche) im Plan macht ihn nicht zu Text."""
+    from quellenuebersetzer.pipeline import structure
+    from quellenuebersetzer.runtime.layout import Region
+
+    page = sammlung.build("stadtplan", aged)
+    color = _bgr(page)
+    feats = features.analyse(color)
+    ink = features.text_ink(cv2.cvtColor(color, cv2.COLOR_BGR2GRAY), feats)
+    plan = next(b for b in page.blocks if b.kind == "abbildung").box
+    text = next(b for b in page.blocks if b.flow == "text1").box
+    for kind in ("absatz", "abbildung"):
+        raw = [Region(kind, plan, 0.9, 1), Region("absatz", text, 0.9, 0)]
+        regions, _deco = structure.build(raw, feats, ink, color)
+        inside = [r for r in regions if r.box[1] >= plan[1] - 10 and r.box[3] <= plan[3] + 10]
+        assert [r.kind for r in inside] == ["abbildung"], (kind, [(r.kind, r.box) for r in inside])
+        assert any(r.kind == "absatz" and r.box[3] < plan[1] for r in regions)  # Text darüber bleibt Text
+
+
+def test_graphic_share_separates_drawings_from_text():
+    from quellenuebersetzer.pipeline.structure import graphic_share
+
+    page = sammlung.build("stadtplan")
+    color = _bgr(page)
+    ink = features.text_ink(cv2.cvtColor(color, cv2.COLOR_BGR2GRAY), features.analyse(color))
+    plan = next(b for b in page.blocks if b.kind == "abbildung").box
+    text = next(b for b in page.blocks if b.flow == "text1").box
+    assert graphic_share(plan, ink, 40) > 0.6
+    assert graphic_share(text, ink, 40) < 0.05
+
+
+# --------------------------------------------------------------------------- gedrehte Titel, Namensformen, Unlesbares
+
+
+def _rotated_title_doc(tmp_path, caption=""):
+    from quellenuebersetzer.pipeline.layout_doc import LayoutDocument, LPage, LRegion
+
+    page = sammlung.build("seitenleiste")
+    cv2.imencode(".png", _bgr(page))[1].tofile(str(tmp_path / "hintergrund-0001.png"))
+    title = LRegion("s1b1", "titel", (183, 245, 303, 814), 0, "Kraków", "Kraków", line_px=103, rotation=90,
+                    keep_original=True, caption=caption)
+    text = LRegion("s1b2", "absatz", (631, 258, 2222, 541), 1, "Tekst.", "Text.", line_px=40, lines=5)
+    lp = LPage(1, 2480, 3508, 300, "hintergrund-0001.png", [title, text], read=True)
+    return LayoutDocument("q", "Q", "druck", str(tmp_path), [lp])
+
+
+def test_place_name_gets_german_form_but_is_not_translated():
+    from quellenuebersetzer.pipeline.layout_doc import LayoutDocument, LPage, LRegion
+    from quellenuebersetzer.pipeline.layout_translate import LayoutTranslator
+    from quellenuebersetzer.pipeline.translate import Translator
+    from quellenuebersetzer.runtime.ollama import ChatResult
+
+    class Client:
+        def __init__(self):
+            self.prompts = []
+
+        def chat(self, model, messages, **kw):
+            self.prompts.append(messages[-1]["content"])
+            return ChatResult('{"german": "Krakau"}', [])
+
+    title = LRegion("s1b1", "titel", (0, 0, 50, 300), 0, "Kraków", rotation=90, keep_original=True)
+    doc = LayoutDocument("q", "Q", "druck", ".", [LPage(1, 100, 400, 300, "x", [title], read=True)])
+    client = Client()
+    LayoutTranslator(doc, Translator(client, "m", "Polish", "20. Jh.", (1900, 1999))).translate_pages(doc.pages)
+    assert title.caption == "(Krakau)" and title.target_md == "Kraków"  # Original bleibt, Ergänzung kommt
+    assert len(client.prompts) == 1 and "exonym" in client.prompts[0]
+    assert any("Einschätzung des Sprachmodells" in i for i in title.issues)
+
+
+def test_invented_or_identical_place_names_are_rejected():
+    from quellenuebersetzer.pipeline.translate import Translator
+    from quellenuebersetzer.runtime.ollama import ChatResult
+
+    class Client:
+        def __init__(self, answer):
+            self.answer = answer
+
+        def chat(self, model, messages, **kw):
+            return ChatResult(self.answer, [])
+
+    assert Translator(Client('{"german": "Kodeń"}'), "m", "Polish", "", (1900, 1999)).german_place_name("Kodeń") == ""
+    assert Translator(Client('{"german": ""}'), "m", "Polish", "", (1900, 1999)).german_place_name("Kodeń") == ""
+    assert Translator(Client("kein JSON"), "m", "Polish", "", (1900, 1999)).german_place_name("Kodeń") == ""
+
+
+@pytest.mark.parametrize("faksimile", [True, False])
+def test_rotated_title_keeps_original_and_caption_is_set_rotated(tmp_path, tess_root, faksimile):
+    from quellenuebersetzer.config import Paths
+    from quellenuebersetzer.pipeline import layout_docx, layout_render
+
+    doc = _rotated_title_doc(tmp_path, "(Krakau)")
+    src = layout_render.build_typst(doc, faksimile, True, False, "T", appendix=False)
+    assert "(Krakau)" in src and "rotate(-90deg" in src
+    assert ('original-s1b1.png' in src) != faksimile  # Neusatz: Original als Ausschnitt, Faksimile: Hintergrund
+    typst = Paths(tess_root).runtime / "typst" / "typst.exe"
+    if typst.exists():
+        layout_render.render_pdf(doc, tmp_path / "out.pdf", typst, faksimile=faksimile, title="T")
+        assert (tmp_path / "out.pdf").stat().st_size > 1000
+    out = layout_docx.build_docx(doc, tmp_path / "out.docx", faksimile=faksimile, title="T")
+    import zipfile
+
+    xml = zipfile.ZipFile(out).read("word/document.xml").decode("utf-8")
+    assert 'w:textDirection w:val="btLr"' in xml and "(Krakau)" in xml
+
+
+def test_illegible_region_is_not_painted_over_in_facsimile(tmp_path):
+    from quellenuebersetzer.pipeline.layout_render import erase_text
+
+    doc = _rotated_title_doc(tmp_path)
+    page = doc.pages[0]
+    page.regions[0].keep_original = True
+    erase_text(tmp_path / page.background, page, tmp_path / "f.jpg")
+    before = cv2.imread(str(tmp_path / page.background))
+    after = cv2.imread(str(tmp_path / "f.jpg"))
+    x0, y0, x1, y1 = page.regions[0].box
+    diff = np.abs(before[y0:y1, x0:x1].astype(int) - after[y0:y1, x0:x1].astype(int)).mean()
+    assert diff < 6  # Original unverändert (nur JPEG-Rauschen)
+    x0, y0, x1, y1 = page.regions[1].box
+    assert np.abs(before[y0:y1, x0:x1].astype(int) - after[y0:y1, x0:x1].astype(int)).mean() > 6  # Text retuschiert
+
+
+@pytest.mark.parametrize("aged", [False, True])
+def test_pale_map_stays_an_image_even_with_colour_areas_inside(aged):
+    """Heller Plan (grauer Grund, weiße Straßen, See) – auch wenn das Modell ihn als Absatz meldet."""
+    from quellenuebersetzer.pipeline import structure
+    from quellenuebersetzer.runtime.layout import Region
+
+    page = sammlung.build("heller_plan", aged)
+    color = _bgr(page)
+    feats = features.analyse(color)
+    ink = features.text_ink(cv2.cvtColor(color, cv2.COLOR_BGR2GRAY), feats)
+    plan = next(b for b in page.blocks if b.kind == "abbildung").box
+    for kind in ("absatz", "abbildung"):
+        raw = [Region(kind, plan, 0.9, 0)] + [Region("absatz", b.box, 0.9, 1) for b in page.blocks
+                                              if b.flow in ("spalte1", "spalte2")]
+        regions, deco = structure.build(raw, feats, ink, color)
+        inside = [r for r in regions if r.box[1] >= plan[1] - 10 and r.box[3] <= plan[3] + 10]
+        assert [r.kind for r in inside] == ["abbildung"], (kind, [(r.kind, r.box) for r in inside])
+        assert not any(d["box"][1] >= plan[1] - 10 and d["box"][3] <= plan[3] + 10 for d in deco)
+
+
+def test_footnote_high_on_the_page_is_not_a_footnote():
+    from quellenuebersetzer.pipeline.structure import _margin_rules
+    from quellenuebersetzer.runtime.layout import Region
+
+    body = Region("absatz", (600, 200, 2200, 3000), 0.9, 0)
+    side = Region("fussnote", (100, 900, 400, 1000), 0.6, 1)  # Seitenleiste, vom Modell als Fußnote gemeldet
+    low = Region("fussnote", (600, 3100, 2200, 3200), 0.8, 2)
+    _margin_rules([body, side, low], 2480, 3508)
+    assert side.kind == "randnotiz" and low.kind == "fussnote"
+
+
+def test_other_scripts_are_read_word_by_word(tmp_path, tess_root):
+    """Namensformen in Jiddisch, Hebräisch, Russisch in einer polnischen Seitenleiste."""
+    from quellenuebersetzer.config import Paths
+    from quellenuebersetzer.pipeline import markup
+    from quellenuebersetzer.pipeline.document import PageImage
+    from quellenuebersetzer.pipeline.layout_reading import LayoutReader
+    from quellenuebersetzer.profile import SourceKind
+    from quellenuebersetzer.runtime.layout import LayoutDetector
+    from quellenuebersetzer.runtime.tesseract import Tesseract
+
+    det = LayoutDetector(Paths(tess_root))
+    tess = Tesseract(Paths(tess_root))
+    if not det.available or not (tess.tessdata / "heb.traineddata").exists():
+        pytest.skip("Seitenaufbau-Modell oder Schriftmodelle nicht in der Testumgebung")
+    page = sammlung.build("seitenleiste")
+    cv2.imencode(".png", _bgr(page))[1].tofile(str(tmp_path / "hintergrund-0001.png"))
+    reader = LayoutReader(SourceKind.DRUCK, tess, ["pol", "lat", "deu"], None, None, detector=det, workdir=tmp_path,
+                          extra_scripts=["heb", "yid", "rus"])
+    lp = reader.read_regions([reader.detect_page(PageImage(1, tmp_path / "hintergrund-0001.png"))])[0]
+    text = " ".join(markup.unescape_md(markup.strip_marks(r.source_md)) for r in lp.regions)
+    for word in ("קראקע", "קרקוב", "Краков", "Kraków"):
+        assert word in text, word
+    title = next(r for r in lp.regions if r.rotation)
+    assert title.keep_original and title.rotation == 90
+
+
+def test_vertical_title_missed_by_the_model_is_collected(tmp_path, tess_root):
+    """Vollständigkeit: Meldet das Layoutmodell den senkrechten Titel gar nicht, wird er eingesammelt."""
+    from quellenuebersetzer.config import Paths
+    from quellenuebersetzer.pipeline.document import PageImage
+    from quellenuebersetzer.pipeline.layout_reading import LayoutReader
+    from quellenuebersetzer.profile import SourceKind
+    from quellenuebersetzer.runtime.layout import LayoutDetector
+    from quellenuebersetzer.runtime.tesseract import Tesseract
+
+    det = LayoutDetector(Paths(tess_root))
+    if not det.available:
+        pytest.skip("Seitenaufbau-Modell nicht in der Testumgebung")
+    page = sammlung.build("seitenleiste")
+    cv2.imencode(".png", _bgr(page))[1].tofile(str(tmp_path / "hintergrund-0001.png"))
+    reader = LayoutReader(SourceKind.DRUCK, Tesseract(Paths(tess_root)), ["pol", "lat", "deu"], None, None,
+                          detector=det, workdir=tmp_path)
+    lp = reader.detect_page(PageImage(1, tmp_path / "hintergrund-0001.png"))
+    lp.regions = [r for r in lp.regions if r.box[2] > 400 or r.box[1] > 820]  # Titel „übersehen“
+    lp = reader.read_regions([lp])[0]
+    titles = [r for r in lp.regions if r.rotation]
+    assert len(titles) == 1 and "Kraków" in titles[0].source_md and titles[0].keep_original
+
+
+def test_rotated_capitals_read_horizontally_do_not_beat_real_words():
+    from quellenuebersetzer.pipeline.layout_reading import _rotation_wins
+    from quellenuebersetzer.runtime.tesseract import Line, Word
+
+    def line(*words):
+        return Line([Word(t, c, (0, 0, 1, 1)) for t, c in words], (0, 0, 1, 1), 0, 0)
+
+    horizontal = [line(("m", 65), ("O", 89), ("E", 76), ("N", 94), ("Te", 87), ("Ui", 88), ("AS", 56))]
+    rotated = [line(("Jeziorzany", 72), ("(Łysobyki)", 68))]
+    assert _rotation_wins(rotated, horizontal)
+    assert not _rotation_wins(horizontal, rotated)
+    assert not _rotation_wins([line(("Ab", 99))], [])  # keine echten Wörter

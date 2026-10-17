@@ -177,7 +177,7 @@ def build_plan(profile: Profile, info: SystemInfo, catalog: Catalog, manifest: M
             for t in lang.tesseract_langs_for(kind.value):
                 if t not in wanted:
                     wanted.append(t)
-        for t in lang.tesseract.get("zusatz", []):
+        for t in lang.tesseract.get("zusatz", []) + lang.tesseract.get("nachlesen", []):
             if t not in wanted:
                 wanted.append(t)
         for t in wanted:

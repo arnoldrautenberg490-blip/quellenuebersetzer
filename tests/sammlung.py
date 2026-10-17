@@ -406,6 +406,170 @@ def p_tabelle_im_kasten(c: Canvas) -> None:
     c.paragraph(250, 1580, 1980, 40, 42, "text2")
 
 
+def p_farbflaechen(c: Canvas) -> None:
+    """Farbblöcke, wie sie in Broschüren und Zeitschriften vorkommen: randabfallendes Band bis zum Seitenrand,
+    zwei direkt aneinanderstoßende Blöcke verschiedener Farbe, weiße Schrift auf mittlerem Rot und Grün,
+    ein Block mit abgerundeten Ecken."""
+    # randabfallendes dunkelblaues Band oben, weiße Schrift
+    c.box((0, 0, W, 330), (40, 60, 120), "", flow="band")
+    c.paragraph(250, 90, 1980, 0, 64, "band", "ueberschrift", bold=True, color=(255, 255, 255),
+                words="Kronika cechów miejskich".split())
+    c.paragraph(250, 200, 1980, 12, 38, "band", color=(235, 235, 245), main=True)
+    c.paragraph(250, 420, 1980, 45, 40, "text1")
+    # zwei aneinanderstoßende Blöcke: Rot (weiße Schrift) | Grün (weiße Schrift)
+    c.box((250, 760, 1240, 1300), (190, 50, 45), "", flow="rot")
+    c.paragraph(300, 800, 890, 45, 38, "rot", color=(255, 255, 255))
+    c.box((1240, 760, 2230, 1300), (60, 140, 80), "", flow="gruen")
+    c.paragraph(1290, 800, 890, 45, 38, "gruen", color=(255, 255, 255))
+    # abgerundeter, hell orangefarbener Block mit dunkler Schrift
+    c.d.rounded_rectangle((250, 1380, 2230, 1800), radius=60, fill=(252, 226, 190))
+    c.add(TBlock("", "kasten", (250, 1380, 2230, 1800), "orange", bg=hexcolor((252, 226, 190))), main=False)
+    c.paragraph(320, 1420, 1840, 50, 40, "orange")
+    c.paragraph(250, 1880, 1980, 50, 40, "text2")
+    # randabfallender Block rechts unten bis zum Seitenrand, weiße Schrift auf Grau
+    c.paragraph(250, 2500, 960, 70, 40, "text3")
+    c.box((1300, 2500, W, H), (90, 90, 95), "", flow="ecke")
+    c.paragraph(1360, 2560, 1000, 50, 38, "ecke", color=(250, 250, 250))
+
+
+def _draw_map(c: Canvas, box, seed_words: list[str]) -> None:
+    """Stadtplan-Imitat: Häuserblöcke, Park, Fluss, Straßen als Doppellinien, Straßennamen in mehreren Richtungen."""
+    x0, y0, x1, y1 = box
+    d = c.d
+    d.rectangle(box, fill=(244, 238, 222), outline=(90, 80, 70), width=4)
+    rng = c.rng
+    # Häuserblöcke
+    for _ in range(26):
+        bx, by = rng.randint(x0 + 40, x1 - 220), rng.randint(y0 + 40, y1 - 160)
+        d.rectangle([bx, by, bx + rng.randint(80, 200), by + rng.randint(60, 140)], fill=(222, 200, 180),
+                    outline=(150, 120, 100), width=2)
+    # Park und Fluss
+    d.ellipse([x0 + 120, y1 - 420, x0 + 600, y1 - 120], fill=(190, 220, 170), outline=(110, 150, 90), width=3)
+    river = [(x0, y0 + 300 + k * 6 + int(60 * np.sin(k / 9))) for k in range(0, 1)]
+    pts = [(x, int(y0 + 300 + 80 * np.sin((x - x0) / 160))) for x in range(x0, x1, 20)]
+    d.line(pts, fill=(140, 180, 220), width=46)
+    # Straßen: Doppellinien, gerade und schräg
+    for k in range(5):
+        y = y0 + 120 + k * (y1 - y0 - 200) // 4
+        d.line([(x0, y), (x1, y + rng.randint(-60, 60))], fill=(80, 70, 60), width=26)
+        d.line([(x0, y), (x1, y + rng.randint(-60, 60))], fill=(250, 248, 240), width=18)
+    for k in range(4):
+        x = x0 + 200 + k * (x1 - x0 - 300) // 3
+        d.line([(x, y0), (x + rng.randint(-120, 120), y1)], fill=(80, 70, 60), width=24)
+        d.line([(x, y0), (x + rng.randint(-120, 120), y1)], fill=(250, 248, 240), width=16)
+    # Straßennamen: waagrecht, senkrecht, schräg
+    for i, word in enumerate(seed_words):
+        f = font(30, italic=i % 3 == 0)
+        tw = int(f.getlength(word)) + 10
+        tile = Image.new("RGBA", (tw, 44), (0, 0, 0, 0))
+        ImageDraw.Draw(tile).text((5, 4), word, font=f, fill=(40, 30, 25, 255))
+        angle = [0, 90, 25, -35, 0, 60][i % 6]
+        tile = tile.rotate(angle, expand=True)
+        px = rng.randint(x0 + 30, max(x0 + 31, x1 - tile.width - 30))
+        py = rng.randint(y0 + 30, max(y0 + 31, y1 - tile.height - 30))
+        c.img.paste(tile, (px, py), tile)
+    # Kompassrose und Maßstab
+    d.polygon([(x1 - 90, y0 + 40), (x1 - 70, y0 + 110), (x1 - 110, y0 + 110)], fill=(40, 30, 25))
+    d.rectangle([x0 + 40, y1 - 60, x0 + 340, y1 - 48], fill=(40, 30, 25))
+
+
+def p_stadtplan(c: Canvas) -> None:
+    """Stadtplan als Abbildung mit Straßennamen – muss Bild bleiben, darf nicht als Text gelesen werden."""
+    c.paragraph(250, 230, 1980, 55, 42, "text1")
+    box = (250, 700, 2230, 2350)
+    names = ["ul. Floriańska", "Rynek Główny", "ul. Grodzka", "Planty", "ul. Szewska", "Wisła",
+             "pl. Mariacki", "ul. Sienna", "ul. Wiślna", "Barbakan", "ul. Długa", "Kleparz"]
+    _draw_map(c, box, names)
+    c.add(TBlock("", "abbildung", box, "abbildung"), main=False)
+    c.paragraph(250, 2390, 1980, 0, 34, "unterschrift", "bildunterschrift",
+                words="Ryc. 3. Plan miasta Krakowa z roku 1785".split())
+    c.paragraph(250, 2550, 1980, 50, 42, "text2")
+
+
+def p_heller_plan(c: Canvas) -> None:
+    """Blasser Ortsplan wie in Gedenkbüchern: hellgrauer Grund, weiße Straßen, See, Grünflächen, Symbole,
+    wenige dunkle Beschriftungen – muss Bild bleiben."""
+    box = (250, 250, 2230, 1500)
+    x0, y0, x1, y1 = box
+    d = c.d
+    d.rectangle(box, fill=(222, 224, 226))
+    d.polygon([(x0, y0 + 150), (x0 + 700, y0 + 120), (x0 + 760, y0 + 380), (x0 + 200, y0 + 460), (x0, y0 + 420)],
+              fill=(110, 190, 180))  # See
+    d.rectangle([x1 - 520, y0 + 60, x1 - 180, y0 + 300], fill=(150, 200, 120))  # Grünfläche
+    d.rectangle([x0 + 900, y1 - 300, x0 + 1300, y1 - 120], fill=(150, 200, 120))
+    for pts, wd in ((((x0, y0 + 700), (x1, y0 + 640)), 60), (((x0 + 1100, y0), (x0 + 1000, y1)), 70),
+                    (((x0 + 300, y1), (x0 + 1500, y0 + 200)), 50), (((x0 + 1400, y0 + 900), (x1, y1 - 100)), 40)):
+        d.line(pts, fill=(255, 255, 255), width=wd)  # weiße Straßen
+    d.line([(x0 + 1500, y0 + 400), (x1, y0 + 450)], fill=(120, 170, 200), width=14)  # Bach
+    for bx, by in ((x0 + 980, y0 + 300), (x0 + 1450, y0 + 980)):  # Symbole
+        d.rectangle([bx, by, bx + 110, by + 110], outline=(90, 90, 90), width=5, fill=(250, 250, 250))
+        d.polygon([(bx + 15, by + 55), (bx + 55, by + 15), (bx + 95, by + 55)], outline=(90, 90, 90))
+        d.text((bx + 30, by + 120), "[1]", font=font(34), fill=(90, 90, 90))
+    for word, angle, (px, py) in (("WARSZAWSKA", 55, (x0 + 1180, y0 + 700)), ("RYNEK", 0, (x0 + 1150, y0 + 560))):
+        f = font(34, bold=True)
+        tile = Image.new("RGBA", (int(f.getlength(word)) + 10, 46), (0, 0, 0, 0))
+        ImageDraw.Draw(tile).text((5, 4), word, font=f, fill=(80, 80, 80, 255))
+        tile = tile.rotate(angle, expand=True)
+        c.img.paste(tile, (px, py), tile)
+    c.add(TBlock("", "abbildung", box, "abbildung"), main=False)
+    c.paragraph(250, 1600, 960, 90, 40, "spalte1")
+    c.paragraph(1270, 1600, 960, 90, 40, "spalte2")
+
+
+def _rtl(text: str) -> str:
+    """Hebräische Schrift: PIL (mit raqm) setzt die Schreibrichtung selbst – Text bleibt in logischer Reihenfolge."""
+    return text
+
+
+def p_seitenleiste(c: Canvas) -> None:
+    """Senkrechter Ortsname am Rand, Seitenleiste mit Namensformen in Jiddisch, Hebräisch und Russisch,
+    eingebettete graue Zwischenüberschrift im Fließtext, farbige Randmarke ohne Text."""
+    # senkrechter Titel (von unten nach oben zu lesen), grün-grau, groß
+    title = "Kraków"
+    f = font(150, bold=True)
+    tile = Image.new("RGBA", (int(f.getlength(title)) + 20, 190), (0, 0, 0, 0))
+    ImageDraw.Draw(tile).text((10, 10), title, font=f, fill=(140, 150, 110, 255))
+    tile = tile.rotate(90, expand=True)
+    c.img.paste(tile, (150, 260), tile)
+    c.add(TBlock("", "titel", (150, 260, 150 + tile.width, 260 + tile.height), "senkrecht", [title]), main=False)
+    # Seitenleiste darunter
+    y = 260 + tile.height + 60
+    for i, (line, kind) in enumerate((("LOKALIZACJA", "c"), ("powiat krakowski", "l"), ("gmina Kraków", "l"))):
+        c.d.text((150, y + i * 44), line, font=font(30, bold=(kind == "c")), fill=(60, 60, 60))
+    sidebar_lines = [("Krakow,", "Krakow,"), ("Krakau,", "Krakau,"), (_rtl("קראקע") + " (jid.),", "קראקע (jid.),"),
+                     (_rtl("קרקוב") + " (hebr.),", "קרקוב (hebr.),"), ("Краков (ros.)", "Краков (ros.)")]
+    y2 = y + 3 * 44 + 40
+    c.d.text((150, y2), "NAZWY MIEJSCA", font=font(30, bold=True), fill=(60, 60, 60))
+    for i, (drawn, _logical) in enumerate(sidebar_lines):
+        # Richtungsmarke: Grundrichtung links→rechts, hebräische Wörter darin rechts→links
+        c.d.text((150, y2 + 50 + i * 44), "‎" + drawn, font=font(32), fill=(40, 40, 40))
+    words = "LOKALIZACJA powiat krakowski gmina Kraków".split()
+    c.add(TBlock("", "randnotiz", (150, y, 520, y + 3 * 44), "leiste1", words), main=False)
+    side_words = ["NAZWY", "MIEJSCA"] + [w for _d, logical in sidebar_lines for w in logical.split()]
+    c.add(TBlock("", "randnotiz", (150, y2, 520, y2 + 50 + 5 * 44), "leiste2", side_words), main=False)
+    # Haupttext: zwei Spalten, links mit eingebetteter grauer Zwischenüberschrift
+    c.paragraph(640, 260, 1590, 60, 40, "einleitung")
+    head = "HISTORIA KRAKOWA •".split()
+    body = c.words(70)
+    fh, fb = font(36), font(40)
+    x, yy, line_x1 = 640, 760, 640 + 760
+    cur_x = x
+    drawn_words = []
+    for w, f_, col in [(h, fh, (120, 120, 120)) for h in head] + [(b, fb, INK) for b in body]:
+        wl = f_.getlength(w)
+        if cur_x + wl > line_x1:
+            yy += 56
+            cur_x = x
+        c.d.text((cur_x, yy + (4 if f_ is fh else 0)), w, font=f_, fill=col)
+        cur_x += wl + f_.getlength(" ")
+        drawn_words.append(w)
+    c.add(TBlock("", "absatz", (640, 765, line_x1, yy + 42), "spalte1", drawn_words))
+    c.paragraph(1470, 760, 760, 80, 40, "spalte2")
+    # farbige Randmarke ohne Text (Daumenregister)
+    c.d.rectangle([0, 3200, 170, 3420], fill=(150, 170, 140))
+    c.add(TBlock("", "dekor", (0, 3200, 170, 3420), "dekor"), main=False)
+
+
 PAGE_TYPES = {
     "zweispaltig": p_zweispaltig,
     "dreispaltig": p_dreispaltig,
@@ -423,6 +587,10 @@ PAGE_TYPES = {
     "tabelle_mehrzeilig": p_tabelle_mehrzeilig,
     "tabelle_spalten": p_tabelle_spalten,
     "tabelle_im_kasten": p_tabelle_im_kasten,
+    "farbflaechen": p_farbflaechen,
+    "stadtplan": p_stadtplan,
+    "heller_plan": p_heller_plan,
+    "seitenleiste": p_seitenleiste,
 }
 
 

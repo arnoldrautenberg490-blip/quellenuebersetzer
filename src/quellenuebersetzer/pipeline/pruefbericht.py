@@ -65,6 +65,7 @@ def page_issues(page: LPage) -> list[str]:
 
 
 def light(issues: list[str]) -> str:
+    issues = [i for i in issues if "Hinweis:" not in i]  # reine Hinweise (z. B. ergänzte Namensform) zählen nicht
     if any(any(k in i for k in RED) for i in issues):
         return "rot"
     return "gelb" if issues else "grün"
@@ -131,7 +132,9 @@ def diagnose(doc: LayoutDocument) -> dict:
                 "hinweise": [_issue_kind(i) for i in r.issues],
             } for r in p.regions],
         })
-    return {"format": 1, "seiten": pages}
+    from quellenuebersetzer import __version__, build_stamp
+
+    return {"format": 1, "programm": f"{__version__} ({build_stamp()})", "seiten": pages}
 
 
 def write_diagnose(doc: LayoutDocument, path: Path) -> Path:

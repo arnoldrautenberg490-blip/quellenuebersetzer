@@ -329,7 +329,7 @@ def main() -> None:
                 bgr = cv2.cvtColor(np.asarray(page.image), cv2.COLOR_RGB2BGR)
                 cv2.imencode(".png", bgr)[1].tofile(str(work / "hintergrund-0001.png"))
                 reader = LayoutReader(SourceKind.DRUCK, Tesseract(paths), ["pol"], None, None, detector=det,
-                                      workdir=work)
+                                      workdir=work, extra_scripts=["heb", "yid", "rus"])
                 t0 = time.perf_counter()
                 lp = reader.detect_page(PageImage(1, work / "hintergrund-0001.png"))
                 lp = reader.read_regions([lp])[0]

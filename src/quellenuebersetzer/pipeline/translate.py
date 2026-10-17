@@ -151,6 +151,7 @@ Rules:
    Never put explanations, glosses or the original words in parentheses into the translation – explanations belong only into "terms".
 2. Personal names keep their original spelling. Places: use the established German name if one exists
    (Kraków → Krakau, Warszawa → Warschau, Gdańsk → Danzig), otherwise the Polish nominative form.
+   Words in Hebrew, Yiddish or Cyrillic script (e.g. other name forms of a place) stay unchanged.
    Numbers, dates and amounts stay unchanged. Currency names: złoty → Złoty, grosz → Groschen. Translate Latin or German passages too.
 3. Tags like <a_1>…</a_1> mark uncertain readings. Every such tag must appear exactly once in your translation, wrapped
    around the German rendering of the enclosed words. For each, give the German translation of every listed alternative
@@ -179,6 +180,34 @@ Answer: {{"translation": "Der <b2_1>Starost</b2_1> bestätigte das Privileg für
 "terms": [{{"id": "b2_1", "original": "starosta", "then": "", "now": "", "explanation": "{EXAMPLE_EXPLANATION}", "evidence": "Wiktionary: historisch"}}]}}
 
 Answer only with JSON matching the schema."""
+
+    def german_place_name(self, name: str) -> str:
+        """Eingebürgerte deutsche Namensform eines Ortes (Kraków → Krakau) oder leer.
+
+        Leer, wenn es keine gibt, das Modell unsicher ist oder sie gleich geschrieben wird – lieber nichts als
+        ein erfundener Name.
+        """
+        plain = markup.unescape_md(markup.strip_marks(name)).strip()
+        if not plain or len(plain.split()) > 6:
+            return ""
+        prompt = (f'Place name from a historical {self.lang} source: "{plain}". If there is a well-established '
+                  "German name (exonym) in common use for this place (e.g. Kraków → Krakau, Gdańsk → Danzig, "
+                  "Oświęcim → Auschwitz, Lwów → Lemberg), answer with it, keeping any second name in parentheses. "
+                  "If none exists, if you are not sure, or if the German name is spelled the same, answer with an "
+                  'empty string. Never invent a name. Answer only with JSON {"german": "..."}.')
+        schema = {"type": "object", "properties": {"german": {"type": "string"}}, "required": ["german"]}
+        try:
+            res = self.client.chat(self.model, [{"role": "user", "content": prompt}], json_schema=schema,
+                                   num_ctx=_main_ctx(), temperature=0.0, num_predict=60, think=None)
+            german = str(json.loads(res.text).get("german", "")).strip()
+        except (OllamaError, ValueError, TypeError):
+            return ""
+        def norm(t: str) -> str:
+            return re.sub(r"\W", "", t.casefold())
+        if (not german or norm(german) == norm(plain) or len(german.split()) > 6
+                or re.search(r"[<>{}\[\]\\]", german)):
+            return ""
+        return german
 
     def _user_prompt(self, seg: Segment, tagged: markup.Tagged, previous: tuple[str, str] | None,
                      lex: list[LexEntry], gloss) -> str:
@@ -418,6 +447,12 @@ def local_repair(seg: Segment, tagged: markup.Tagged, data: dict, problems: list
     keep = [i for i in b_ids if i in terms][:max(1, min(2, n_words // 12))]
     text = _drop_tags(text, {i for i in b_ids if i not in keep})
     return {**data, "translation": text}
+
+
+def _main_ctx() -> int:
+    from quellenuebersetzer.pipeline.readers import MAIN_CTX
+
+    return MAIN_CTX
 
 
 def _strip_stray_tags(text: str) -> str:

@@ -29,12 +29,21 @@ def ink_color(color_crop: np.ndarray, ink: np.ndarray) -> str:
     """Farbe der Schrift, wenn sie deutlich farbig ist (z. B. rote Rubrik), sonst leer."""
     if ink.sum() < 30:
         return ""
-    pixels = color_crop[ink.astype(bool)]
-    hsv = cv2.cvtColor(pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
+    mask = ink.astype(bool)
+    pixels = color_crop[mask].astype(np.float32)
+    ground = color_crop[~mask].astype(np.float32)
+    light_on_dark = False
+    if len(ground) >= 30:
+        # nur die Kerne der Buchstaben: Randpixel sind mit dem Hintergrund vermischt und verfälschen die Farbe
+        bg = np.median(ground, axis=0)
+        dist = np.linalg.norm(pixels - bg, axis=1)
+        pixels = pixels[dist >= np.percentile(dist, 60)]
+        light_on_dark = float(pixels.mean()) > float(bg.mean())
+    hsv = cv2.cvtColor(pixels.astype(np.uint8).reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
     sat, val = np.median(hsv[:, 1]), np.median(hsv[:, 2])
     b, g, r = (int(v) for v in np.median(pixels, axis=0))
-    if val > 170 and sat < 70:
-        return f"#{r:02x}{g:02x}{b:02x}"  # helle Schrift (auf dunklem Grund)
+    if light_on_dark or (val > 170 and sat < 70):
+        return f"#{r:02x}{g:02x}{b:02x}"  # helle Schrift auf farbigem oder dunklem Grund
     if sat < 70 or val < 50:
         return ""  # schwarz, grau oder braun-schwarz: normale Schrift
     # etwas abdunkeln: Druckfarbe wirkt auf dem Scan meist heller als im Satz

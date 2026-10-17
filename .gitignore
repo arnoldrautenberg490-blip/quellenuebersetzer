@@ -17,3 +17,4 @@ quellen/
 *.docx
 *.epub
 !src/quellenuebersetzer/resources/export/referenz.docx
+src/quellenuebersetzer/resources/baustempel.txt

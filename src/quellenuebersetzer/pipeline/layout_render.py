@@ -160,7 +160,7 @@ def erase_text(background: Path, page: LPage, out: Path) -> Path:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     mask = np.zeros(gray.shape, np.uint8)
     for r in page.regions:
-        if r.kind in IMAGE_KINDS or not r.target_md:
+        if r.kind in IMAGE_KINDS or not r.target_md or r.keep_original:
             continue
         for x0, y0, x1, y1 in r.erase_boxes or [r.box]:
             pad = max(3, int((y1 - y0) * 0.12))
@@ -213,7 +213,68 @@ def _pt(px: float, dpi: float) -> float:
     return px / dpi * 72.0
 
 
-def _region_typst(r: LRegion, page: LPage, notes: Notes, faksimile: bool, box_px=None) -> str:
+def original_crop(work: Path, page: LPage, r: LRegion) -> str:
+    """Ausschnitt des Originals für einen Bereich, der unverändert bleibt (Neusatz)."""
+    name = f"original-{r.id}.png"
+    if not (work / name).exists():
+        data = np.fromfile(str(work / page.background), dtype=np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        x0, y0, x1, y1 = r.box
+        ok, buf = cv2.imencode(".png", img[y0:y1, x0:x1])
+        buf.tofile(str(work / name))
+    return name
+
+
+def caption_box(page: LPage, r: LRegion, boxes: dict) -> tuple[tuple[int, int, int, int], int] | None:
+    """Platz für die kleine Ergänzung „(Krakau)“: bei gedrehter Schrift auf deren Unterseite, sonst darunter.
+
+    → (Rahmen in Pixeln, Drehung) oder None, wenn kein freier Platz ist (dann steht sie im Prüfbericht).
+    """
+    x0, y0, x1, y1 = r.box
+    thick = int(max(28, 0.45 * (r.line_px or 40)))
+    if r.rotation:
+        right = (x1 + 4, y0, x1 + 4 + thick, y1)
+        left = (x0 - 4 - thick, y0, x0 - 4, y1)
+        candidates = [right, left] if r.rotation == 90 else [left, right]
+    else:
+        candidates = [(x0, y1 + 2, x1, y1 + 2 + thick)]
+    for c in candidates:
+        if c[0] < 0 or c[1] < 0 or c[2] > page.width_px or c[3] > page.height_px:
+            continue
+        if any(min(c[2], b[2]) > max(c[0], b[0]) and min(c[3], b[3]) > max(c[1], b[1])
+               for rid, b in boxes.items() if rid != r.id):
+            continue
+        return c, r.rotation
+    return None
+
+
+def _caption_typst(r: LRegion, page: LPage, boxes: dict) -> str:
+    placed_box = caption_box(page, r, boxes)
+    if not r.caption or placed_box is None:
+        return ""
+    (x0, y0, x1, y1), rotation = placed_box
+    dpi = page.dpi
+    w, h = _pt(x1 - x0, dpi), _pt(y1 - y0, dpi)
+    size = max(6.0, min(12.0, 0.7 * (w if rotation else h)))
+    body = f'#text(size: {size:.1f}pt, fill: rgb("#3b3530"))[{_tstr(r.caption)}]'
+    if rotation:
+        body = f"#rotate({'-90deg' if rotation == 90 else '90deg'}, reflow: true)[{body}]"
+    return (f"#place(top + left, dx: {_pt(x0, dpi):.2f}pt, dy: {_pt(y0, dpi):.2f}pt)"
+            f"[#box(width: {w:.2f}pt, height: {h:.2f}pt)[#align(center + horizon)[{body}]]]")
+
+
+def _region_typst(r: LRegion, page: LPage, notes: Notes, faksimile: bool, box_px=None, work: Path | None = None,
+                  boxes: dict | None = None) -> str:
+    if r.keep_original:
+        # Original bleibt stehen (Ortsname, unlesbare Stelle): im Faksimile ist es Teil des Hintergrunds,
+        # im Neusatz ein Ausschnitt; dazu ggf. die deutsche Namensform
+        out = ""
+        if not faksimile and work is not None:
+            x0, y0, x1, y1 = r.box
+            out = (f"#place(top + left, dx: {_pt(x0, page.dpi):.2f}pt, dy: {_pt(y0, page.dpi):.2f}pt)"
+                   f'[#image("{original_crop(work, page, r)}", width: {_pt(x1 - x0, page.dpi):.2f}pt, '
+                   f'height: {_pt(y1 - y0, page.dpi):.2f}pt, fit: "stretch")]')
+        return out + _caption_typst(r, page, boxes or {})
     x0, y0, x1, y1 = box_px or r.box
     dpi = page.dpi
     dx, dy, w, h = _pt(x0, dpi), _pt(y0, dpi), _pt(x1 - x0, dpi), _pt(y1 - y0, dpi)
@@ -236,15 +297,20 @@ def _region_typst(r: LRegion, page: LPage, notes: Notes, faksimile: bool, box_px
         return (f'{place}[#placed({w:.2f}pt, {h:.2f}pt, 9pt, 0.2em, 0em, "left", "regular", "normal", '
                 f'rgb("#1e1b17"), [{body}])]')
     base = max(5.0, min(40.0, _pt(r.line_px or (y1 - y0), dpi) * 0.92))
-    fit = fit_text(text, (dx, dy, w, h), base, bold, r.italic, r.spaced)
+    tw, th = (h, w) if r.rotation else (w, h)  # gedrehte Schrift: Zeilen laufen entlang der langen Seite
+    fit = fit_text(text, (dx, dy, tw, th), base, bold, r.italic, r.spaced)
     if fit.truncated:
         notes.shortened.append((page.name, text))
     body = md_to_typst(fit.text_md, notes)
     if not body:
         return ""
     lead = max(0.05, fit.leading - 0.662) * fit.size  # Typst: Abstand zwischen Zeilen ab Versalhöhe
-    return (f'{place}[#placed({w:.2f}pt, {h:.2f}pt, {fit.size:.2f}pt, {lead:.2f}pt, {fit.tracking:.3f}em, '
-            f'"{r.align}", {weight}, {style}, {fill}, [{body}])]')
+    inner = (f'#placed({tw:.2f}pt, {th:.2f}pt, {fit.size:.2f}pt, {lead:.2f}pt, {fit.tracking:.3f}em, '
+             f'"{r.align}", {weight}, {style}, {fill}, [{body}])')
+    if r.rotation:
+        angle = "-90deg" if r.rotation == 90 else "90deg"
+        return f"{place}[#box(width: {w:.2f}pt, height: {h:.2f}pt)[#rotate({angle}, reflow: true)[{inner}]]]"
+    return f"{place}[{inner}]"
 
 
 def decoration_typst(d: dict, page: LPage) -> str:
@@ -285,7 +351,7 @@ def build_typst(doc: LayoutDocument, faksimile: bool, translated: bool, handwrit
             for r in page.regions:
                 if not translated:
                     r = LRegion(**{**r.__dict__, "target_md": r.source_md})
-                parts.append(_region_typst(r, page, notes, faksimile, boxes.get(r.id)))
+                parts.append(_region_typst(r, page, notes, faksimile, boxes.get(r.id), work, boxes))
         parts.append("]")
     if not appendix:
         return "\n".join(p for p in parts if p)

@@ -115,6 +115,9 @@ def _pending(regions: list[LRegion]) -> list[LRegion]:
     for r in regions:
         if not (r.translatable and r.source_md.strip()) or r.target_md:
             continue
+        if r.keep_original:
+            r.target_md = r.source_md  # Original bleibt stehen (Ortsname, unlesbare Stelle) – nicht übersetzen
+            continue
         if markup.unescape_md(markup.strip_marks(r.source_md)).strip() == "[unleserlich]":
             r.target_md = r.source_md  # unlesbarer Bereich: nichts zu übersetzen (steht im Prüfbericht)
             continue
@@ -210,6 +213,14 @@ class LayoutTranslator:
     # ------------------------------------------------------------------ Durchgänge
     def translate_pages(self, pages, progress: Callable[[int, int], None] | None = None) -> None:
         """Übersetzt alle noch offenen Bereiche dieser Seiten (in Lesereihenfolge)."""
+        for p in pages:
+            for r in p.regions:
+                if r.keep_original and r.rotation and not r.caption and r.source_md.strip() and not r.target_md:
+                    german = self.tr.german_place_name(r.source_md)
+                    if german:
+                        r.caption = f"({german})"
+                        r.issues.append(f"Hinweis: deutsche Namensform „{german}“ ergänzt (Einschätzung des "
+                                        "Sprachmodells, bitte prüfen).")
         regions = _pending([r for p in pages for r in p.regions])
         units = build_units(regions)
         self.report_finished_pages()

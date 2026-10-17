@@ -22,6 +22,12 @@
       "lat",
       "deu",
       "osd"
+    ],
+    "_nachlesen": "Andere Schriften, die in polnischen Quellen häufig vorkommen (z. B. Namensformen). Nur unsichere Zeilen werden damit nachgelesen – die Texterkennung bleibt so schnell.",
+    "nachlesen": [
+      "heb",
+      "yid",
+      "rus"
     ]
   },
   "prompt": {

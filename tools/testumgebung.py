@@ -27,7 +27,7 @@ def main(root: Path) -> None:
         if not manifest.has("component", cid):
             inst._install_component(catalog.components[cid], lambda *_: None)
         print("bereit:", cid)
-    for lang in ("pol", "frak2021", "lat", "deu"):
+    for lang in ("pol", "frak2021", "lat", "deu", "heb", "yid", "rus"):
         inst._install_tessdata(PlanItem("tessdata", lang, lang, 0, ""), lambda *_: None)
     print("Testumgebung:", root)
 

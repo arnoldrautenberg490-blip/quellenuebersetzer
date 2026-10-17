@@ -293,3 +293,34 @@ def test_distorted_scans_are_straightened_before_layout(tmp_path, tess_root):
     pdf = pdfium.PdfDocument(str(results[0].outputs[-1]))
     sizes = {tuple(round(v) for v in pdf[i].get_size()) for i in range(2)}
     assert len(sizes) == 1  # einheitliches Seitenformat
+
+
+def test_saved_state_of_another_program_version_is_not_reused(tmp_path, tess_root):
+    """Nach einem Update wird der Seitenaufbau neu erkannt – kein alter Zwischenstand."""
+    from conftest import make_mixed_page
+    from quellenuebersetzer.pipeline.layout_doc import LayoutDocument
+    from quellenuebersetzer.runtime.layout import LayoutDetector
+
+    if not LayoutDetector(Paths(tess_root)).available:
+        pytest.skip("Seitenaufbau-Modell nicht in der Testumgebung")
+    src = make_mixed_page(tmp_path / "Band.png")
+    events = []
+    with FakeOllama() as fake:
+        job = _job(tess_root, fake, tmp_path, formats=("pdf",), layout="neusatz", events=events)
+
+        def emit(ev, _orig=job.emit):
+            _orig(ev)
+            if ev.kind == "schritt" and ev.message.startswith("Phase 3 von 3 – Übersetzung: Abschnitt 1 "):
+                job.cancel()
+
+        job.emit = emit
+        job.run([src])
+        state = next(job.paths.cache.rglob("stand.json"))
+        doc = LayoutDocument.load(state)
+        doc.programm = "0.0.1 (Bau 01.01.2026 00:00)"  # Zwischenstand einer älteren Fassung
+        doc.save(state)
+        events2 = []
+        second = _job(tess_root, fake, tmp_path, formats=("pdf",), layout="neusatz", events=events2).run([src])
+    assert second[0].ok
+    assert any("aktualisiert" in e.message for e in events2 if e.kind == "hinweis")
+    assert not any("fortgesetzt" in e.message for e in events2 if e.kind == "hinweis")

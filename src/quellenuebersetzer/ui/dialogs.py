@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from quellenuebersetzer import __version__
+from quellenuebersetzer import __version__, build_stamp
 from quellenuebersetzer.catalog import Catalog
 from quellenuebersetzer.config import APP_NAME, Paths
 from quellenuebersetzer.install.uninstall import folder_size
@@ -398,7 +398,7 @@ class AboutDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(22, 18, 22, 18)
         lay.addWidget(label(APP_NAME, "title"))
-        lay.addWidget(label(f"Version {__version__} · freie Software unter der GNU General Public License 3.0 oder später", "muted"))
+        lay.addWidget(label(f"Version {__version__} ({build_stamp()}) · freie Software unter der GNU General Public License 3.0 oder später", "muted"))
         lay.addWidget(label(
             "Liest und übersetzt historische Quellen vollständig auf dem eigenen Rechner. Während der Verarbeitung "
             "ist jede Netzwerkverbindung nach außen technisch gesperrt. Es gibt keine Telemetrie und keine Konten."))

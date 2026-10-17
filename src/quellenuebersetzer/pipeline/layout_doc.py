@@ -42,6 +42,9 @@ class LRegion:
     container: str = ""  # Kasten (Kennung in ``LPage.decorations``), leer = Seitenfluss
     conf: float = -1.0  # mittlere Lesesicherheit 0–100 (-1 = unbekannt)
     issues: list[str] = field(default_factory=list)  # Hinweise für den Prüfbericht
+    rotation: int = 0  # gedrehte Schrift: 90 = von unten nach oben zu lesen, 270 = von oben nach unten
+    keep_original: bool = False  # Original bleibt stehen (unlesbar oder Ortsname) – nichts übermalen
+    caption: str = ""  # kleine Ergänzung unter dem Original, z. B. deutsche Namensform „(Krakau)“
 
     @property
     def is_text(self) -> bool:
@@ -90,6 +93,7 @@ class LayoutDocument:
     pages: list[LPage] = field(default_factory=list)
     readers: list[str] = field(default_factory=list)
     target_size: list[int] | None = None  # einheitliches Seitenformat (Pixel) nach der Aufbereitung
+    programm: str = ""  # Programmfassung, die diesen Stand erzeugt hat (Zwischenstände gelten nur für sie)
 
     # ------------------------------------------------------------------ Fließtext (für Markdown, EPUB, Prüfung)
     def flow_markdown(self, translated: bool = False, with_ids: bool = False) -> str:
@@ -109,6 +113,8 @@ class LayoutDocument:
                 if with_ids:
                     parts.append(text)  # Art steht in der Bereichsmarke; keine Präfixe (sicherer Rückweg)
                     continue
+                if translated and r.keep_original:
+                    text = r.source_md + (f" {r.caption}" if r.caption else "")
                 if r.kind == "tabelle":
                     parts.append(text)
                 elif r.kind in HEADING_KINDS:

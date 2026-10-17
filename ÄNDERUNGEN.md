@@ -171,6 +171,67 @@ Tabellenzeile galt immer als Kopf, Randtext wurde nach Lage zur „Randnotiz“,
   Auf dem Entwicklungsrechner ohne Grafikkarte: kein Gewinn (17,8 s gegen 16,1 s) → bleibt aus.
 - Zeitprotokoll nennt jetzt Kerne, Überlappung und Zahl gleichzeitiger Übersetzungen.
 
+## Praxistest Gedenkbuch-Seiten: helle Pläne, senkrechte Titel, fremde Schriften (18.10.2026)
+Befunde an zwei eingesandten Seiten und Ursachen:
+- **Heller Plan als Text:** „Zeichnung oder Text“ zählte nur dunkle Linienzüge; ein blasser Plan (grauer Grund,
+  weiße Straßen, See) fiel durch, Plangrund und See wurden zu „Kästen“. → Zusätzlich Farbvielfalt und Schriftdichte
+  (Pläne: Dichte ≤ 0,03, Text/Tabellen ≥ 0,15); Farbflächen in einer Abbildung bleiben Teil des Bildes.
+- **Senkrechte Titel:** nicht erkannt oder waagrecht zu Zeichenmüll gelesen. → Hohe, schmale Bereiche werden in
+  beide Richtungen gedreht gelesen; es gilt die Lesung mit echten Wörtern. Kurze gedrehte Titel sind Ortsnamen:
+  das Original bleibt stehen, darunter (in der Schreibrichtung) klein „(deutsche Namensform)“, falls es eine gibt –
+  im Prüfbericht als Einschätzung des Sprachmodells gekennzeichnet. Längere gedrehte Texte werden gedreht gesetzt.
+- **Fette große Schrift wurde beschädigt:** Die Hintergrund-Ebnung hielt dicke Titelstriche für Hintergrund
+  (Fenster 21 px). → Fenster 61 px – auch fette Titel bleiben vollständig (Lesesicherheit „Kraków“ 55 % → 96 %).
+- **Übersehene Stellen:** Was das Layoutmodell gar nicht meldet, wird eingesammelt – als Text, gedrehter Titel
+  oder Bild; im Neusatz geht nichts verloren.
+- **Unlesbares** wird im Faksimile nicht mehr übermalt (Original bleibt sichtbar), im Neusatz als Ausschnitt gezeigt.
+- **Eingebettete Zwischenüberschriften** („HISTORIA … • Text …“) werden nicht mehr mitten im Wort abgeschnitten.
+- **Seitenleisten:** Teile mit gleichem linkem Rand werden zusammengeführt; „Fußnoten“ weit oben auf der Seite
+  sind Randnotizen; Farbflächen ohne Schrift (Daumenregister) erzeugen keinen Textblock.
+- **Hebräisch, Jiddisch, Russisch:** zusätzliche Schriftmodelle (zusammen 22 MB). Unsichere oder verdächtige
+  Wörter werden Wort für Wort in der Schrift übernommen, in der sie am sichersten gelesen werden
+  („KpakoB“ → „Краков“, „rp“ → „קודן“); eine fremde Schrift gewinnt nur, wenn das Wort überwiegend aus ihren
+  Buchstaben besteht. Wörter in diesen Schriften bleiben in der Übersetzung unverändert.
+- Testsammlung um „heller Plan“ und „Seitenleiste“ (senkrechter Titel, Namensformen in drei Schriften,
+  eingebettete Überschrift, Randmarke) erweitert: 36 Seiten, alle Kennzahlen unverändert gut.
+  An den eingesandten Seiten (aus der Aufbau-Ansicht zurückgerechnet, mit Resten der Einzeichnungen):
+  Pläne als Bild, beide senkrechten Titel als Ortsnamen erkannt, Tabelle und Koordinaten richtig gelesen.
+
+## Praxistest: Stadtpläne als Bild statt als Text (17.10.2026)
+- Ursache: Die Regel „einfarbige Fläche mit Textzeilen ist kein Bild“ griff schon, wenn eine kleine Farbfläche
+  (z. B. ein Park) *in* einer Abbildung lag – der ganze Plan wurde dann als Text gelesen.
+- Diese Umwandlung gilt nur noch, wenn die Farbfläche die ganze Abbildung ausmacht und keine Zeichnung enthält.
+- Neues Merkmal „Zeichnung oder Text“: Anteil der Schwärzung in großen zusammenhängenden Linienzügen
+  (Straßen, Flüsse, Umrisse). Text liegt an allen Testseiten bei 0, Pläne und Bilder bei 0,8–1,0; ab 0,35
+  bleibt ein Bereich Bild – auch wenn das Layoutmodell ihn für Text hält.
+- Neue Testseite „Stadtplan“ (Straßen, Park, Fluss, gedrehte Straßennamen, Bildunterschrift): vorher auf der
+  gealterten Fassung als Zeichenmüll gelesen, jetzt Abbildung; übrige Sammlung unverändert.
+
+## Praxistest mit Testbild: Kasten mit weißer Schrift (17.10.2026)
+- Am eingesandten Bild (Fließtext, darunter türkisgrauer Kasten mit weißer Schrift und runden Ecken) trennt der
+  aktuelle Stand den Kasten richtig ab und liest die weiße Schrift. Der Praxislauf zeigte ihn noch verschmolzen.
+- **Wahrscheinliche Ursache:** Der Buchmodus setzte einen Zwischenstand fort, dessen Seitenaufbau mit einer älteren
+  Fassung erkannt worden war. Zwischenstände gelten jetzt nur noch für die Fassung, die sie erzeugt hat; nach einem
+  Update wird der Seitenaufbau neu erkannt (mit Hinweis).
+- **Baustempel:** Version und Bauzeitpunkt stehen in „Über das Programm“, im Zeitprotokoll und in der Diagnose –
+  so ist eindeutig, welche Fassung lief.
+- Die Farbflächen-Erkennung arbeitet unabhängig von der Bildauflösung (geprüft ab 500 Pixel Seitenbreite).
+
+## Praxistest: farbige Blöcke mit weißer Schrift (17.10.2026)
+Ursachen: Kästen wurden nur über vier gerade Kanten gefunden – Blöcke bis zum Seitenrand, mit abgerundeten
+Ecken oder direkt an einem andersfarbigen Block fielen durch. „Helle Schrift“ wurde nur bei sehr dunklem Grund
+angenommen, weiße Schrift auf Rot, Grün oder Grau wurde nicht gelesen (an der neuen Testseite fehlten 18 % der
+Wörter). Die Schriftfarbe wurde mit den Randpixeln der Buchstaben gemittelt (Weiß auf Rot wurde Rosa).
+
+- **Farbflächen werden über die Farbe erkannt, nicht über Kanten:** Schrift herausfiltern, Bild in einheitliche
+  Flächen zerlegen, jede vom Papier abweichende Fläche ist ein Block – jede Form und Lage.
+- **Helle oder dunkle Schrift wird je Fläche gemessen.** Einfarbige Flächen mit Textzeilen, die das Modell für
+  Abbildungen hält, werden gelesen. Der Randstreifen umgerechneter Flächen erzeugt keine Zeichen mehr.
+- **Schriftfarbe aus den Kernen der Buchstaben;** deutlich größere Schrift in kurzen Bereichen gilt als Überschrift;
+  allein stehende Zeichen ohne Buchstaben nur mit Beleg.
+- Neue Testseite „Farbflächen“: Blöcke 50 % → 100 %, Wörter 82 % → 100 %, Gestaltung 18 % → 100 %.
+  Gesamte Sammlung (30 Seiten): Gestaltung 93 % → 98,8 %, 0 Artefakte, keine Verschlechterung an anderer Stelle.
+
 ## Tabellen: Hinterlegungen, mehrzeilige Zellen, Tabellen in Kästen (17.10.2026)
 Ist-Stand an vier neuen Testseiten (je sauber und gealtert): Mehrzeilige Zellen wurden zu mehreren
 Tabellenzeilen (0 % richtig), Zebrastreifen und hinterlegte Spalten galten als „Kästen“, eine Tabelle in
@@ -213,7 +274,7 @@ Modellbereichs blieben unbemerkt. Teilweise überlappende Bilder/Tabellen und da
   (nur programmeigene, am Installationspfad erkannt).
 
 ## Qualitätssicherung
-- 127 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
+- 156 automatische Tests (synthetische Testdokumente, echter Tesseract/Pandoc/Typst, nachgebildete Modell-Laufzeit),
   darunter Ende-zu-Ende-Qualitätsschranken der Layouterkennung an schwierigen Seiten der Testsammlung.
 - Tests mit echten Modellen auf dem Entwicklungsrechner (ohne Grafikkarte): Gemma 4 E2B und 12B.
 - Setup.exe mehrfach installiert, gestartet und rückstandslos deinstalliert.

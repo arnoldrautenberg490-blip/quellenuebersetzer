@@ -363,20 +363,35 @@ class Job:
         tess, glm, judge = self._readers()
         reader = LayoutReader(kind, tess, self._tess_langs(kind), glm, judge, self.period,
                               status=lambda m: step(m), detector=LayoutDetector(self.paths), workdir=job_cache,
-                              workers=cpu_workers())
+                              workers=cpu_workers(), extra_scripts=self.lang.tesseract.get("nachlesen", []))
         state = job_cache / "stand.json"
-        ldoc = LayoutDocument(str(src), src.stem, kind.value, str(job_cache))
+        from quellenuebersetzer import __version__, build_stamp
+
+        fassung = f"{__version__} ({build_stamp()})"
+        ldoc = LayoutDocument(str(src), src.stem, kind.value, str(job_cache), programm=fassung)
         if state.exists():
             try:
                 ldoc = LayoutDocument.load(state)
                 ldoc.workdir = str(job_cache)
+                if ldoc.programm != fassung:
+                    # Zwischenstand einer anderen Programmfassung: nicht übernehmen (sonst bliebe z. B. ein mit
+                    # der alten Fassung erkannter Seitenaufbau bestehen)
+                    raise ValueError("andere Programmfassung")
                 done_regions = sum(1 for p in ldoc.pages for r in p.regions if r.target_md)
                 read_pages = sum(1 for p in ldoc.pages if p.read)
                 self.emit(Event("hinweis", f"Unterbrochene Verarbeitung wird fortgesetzt: Aufbau von {len(ldoc.pages)} "
                                            f"von {len(ing.pages)} Seiten erkannt, {read_pages} Seiten gelesen, "
                                            f"{done_regions} Bereiche übersetzt.", src.name, index, total))
-            except (OSError, ValueError, TypeError, KeyError):
-                ldoc = LayoutDocument(str(src), src.stem, kind.value, str(job_cache))
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                if "Programmfassung" in str(exc):
+                    self.emit(Event("hinweis", "Das Programm wurde aktualisiert – der gespeicherte Zwischenstand "
+                                               "wird verworfen und der Seitenaufbau neu erkannt.", src.name, index, total))
+                # nur die Dateien des alten Seitenaufbaus entfernen – die eingelesenen Seitenbilder bleiben
+                for pattern in ("stand.json", "hintergrund-*.png", "abbildung-*.png", "kasten-*.png",
+                                "faksimile-*.jpg", "satz-*", "vorschau-*"):
+                    for old in job_cache.glob(pattern):
+                        old.unlink(missing_ok=True)
+                ldoc = LayoutDocument(str(src), src.stem, kind.value, str(job_cache), programm=fassung)
         preview_dir = self.paths.cache / "vorschau"
         shutil.rmtree(preview_dir, ignore_errors=True)
         n_total = len(ing.pages)
@@ -705,7 +720,10 @@ class Job:
         """Zeitprotokoll ohne Inhalte und ohne Dateinamen – zeigt, wo die Zeit bleibt."""
         try:
             self.paths.logs.mkdir(parents=True, exist_ok=True)
-            lines = [f"{time.ctime()} | Quelle *{src.suffix.lower() or '(Ordner)'} | Darstellung {self.options.layout}"
+            from quellenuebersetzer import __version__, build_stamp
+
+            lines = [f"{time.ctime()} | Version {__version__} ({build_stamp()}) | Quelle *{src.suffix.lower() or '(Ordner)'}"
+                     f" | Darstellung {self.options.layout}"
                      f" | Schrift {self.options.kind.value} | Modus {self.settings.mode} | gesamt {seconds:.0f} s"]
             pt = getattr(self, "phase_times", {})
             if pt.get("aufbau") is not None:

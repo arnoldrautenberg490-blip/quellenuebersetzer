@@ -294,7 +294,7 @@ def build_docx(doc: LayoutDocument, out: Path, faksimile: bool = True, translate
         boxes = expand_boxes(page.regions, page.height_px, decorations=page.decorations)
         for r in page.regions:
             pic_id = _add_region(d, anchor_p, r, page, notes, style_ids, faksimile, translated, pic_id, work,
-                                 boxes.get(r.id))
+                                 boxes.get(r.id), boxes)
 
     # Anhang
     last = d.add_section(WD_SECTION.NEW_PAGE)
@@ -382,9 +382,57 @@ def _section_last_paragraph(d, idx: int):
     return p
 
 
+def _rotated_cell_xml(runs: str, x: float, y: float, w: float, h: float, rotation: int) -> str:
+    """Gedrehte Schrift in Word: schwebende Tabelle mit einer Zelle und senkrechter Schreibrichtung."""
+    direction = "btLr" if rotation == 90 else "tbRl"
+    none = "".join(f'<w:{s} w:val="nil"/>' for s in ("top", "left", "bottom", "right", "insideH", "insideV"))
+    return (
+        f'<w:tbl {nsdecls("w")}><w:tblPr>'
+        f'<w:tblpPr w:leftFromText="0" w:rightFromText="0" w:vertAnchor="page" w:horzAnchor="page" '
+        f'w:tblpX="{round(x * TWIPS_PER_PT)}" w:tblpY="{round(y * TWIPS_PER_PT)}"/>'
+        f'<w:tblW w:w="{round(w * TWIPS_PER_PT)}" w:type="dxa"/><w:tblLayout w:type="fixed"/>'
+        f'<w:tblBorders>{none}</w:tblBorders>'
+        f'<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>'
+        f'</w:tblPr><w:tblGrid><w:gridCol w:w="{round(w * TWIPS_PER_PT)}"/></w:tblGrid>'
+        f'<w:tr><w:trPr><w:trHeight w:val="{round(h * TWIPS_PER_PT)}" w:hRule="exact"/></w:trPr>'
+        f'<w:tc><w:tcPr><w:tcW w:w="{round(w * TWIPS_PER_PT)}" w:type="dxa"/><w:textDirection w:val="{direction}"/>'
+        f'<w:vAlign w:val="center"/></w:tcPr><w:p><w:pPr><w:spacing w:before="0" w:after="0"/>'
+        f'<w:jc w:val="center"/></w:pPr>{runs}</w:p></w:tc></w:tr></w:tbl>'
+    )
+
+
+def _spacer() -> str:
+    return f'<w:p {nsdecls("w")}><w:pPr><w:spacing w:before="0" w:after="0"/><w:rPr><w:sz w:val="2"/></w:rPr></w:pPr></w:p>'
+
+
 def _add_region(d, anchor_p, r: LRegion, page: LPage, notes: Notes, style_ids, faksimile: bool, translated: bool,
-                pic_id: int, work: Path, box_px=None) -> int:
+                pic_id: int, work: Path, box_px=None, boxes: dict | None = None) -> int:
     dpi = page.dpi
+    if r.keep_original:
+        # Original bleibt stehen (Ortsname, unlesbare Stelle) – im Neusatz als Ausschnitt; dazu die Namensform
+        from quellenuebersetzer.pipeline.layout_render import caption_box, original_crop
+
+        x0, y0, x1, y1 = r.box
+        if not faksimile:
+            r_id, _ = d.part.get_or_add_image(str(work / original_crop(work, page, r)))
+            pic_id += 1
+            anchor_p.append(parse_xml(_anchor_image(r_id, _px_to_pt(x0, dpi), _px_to_pt(y0, dpi),
+                                                    _px_to_pt(x1 - x0, dpi), _px_to_pt(y1 - y0, dpi), pic_id,
+                                                    behind=False)))
+        placed = caption_box(page, r, boxes or {}) if r.caption else None
+        if placed:
+            (cx0, cy0, cx1, cy1), rotation = placed
+            cw, ch = _px_to_pt(cx1 - cx0, dpi), _px_to_pt(cy1 - cy0, dpi)
+            size = max(6.0, min(12.0, 0.7 * (cw if rotation else ch)))
+            runs = _run(r.caption, size)
+            if rotation:
+                anchor_p.addprevious(parse_xml(_rotated_cell_xml(runs, _px_to_pt(cx0, dpi), _px_to_pt(cy0, dpi),
+                                                                 cw, ch, rotation)))
+                anchor_p.addprevious(parse_xml(_spacer()))
+            else:
+                anchor_p.addprevious(parse_xml(_frame_paragraph(runs, _px_to_pt(cx0, dpi), _px_to_pt(cy0, dpi),
+                                                                cw, ch, size, "center")))
+        return pic_id
     x0, y0, x1, y1 = box_px or r.box
     x, y, w, h = _px_to_pt(x0, dpi), _px_to_pt(y0, dpi), _px_to_pt(x1 - x0, dpi), _px_to_pt(y1 - y0, dpi)
     if r.kind in IMAGE_KINDS:
@@ -403,11 +451,15 @@ def _add_region(d, anchor_p, r: LRegion, page: LPage, notes: Notes, style_ids, f
         return pic_id
     bold = r.bold or r.kind in HEADING_KINDS
     base = max(5.0, min(40.0, _px_to_pt(r.line_px or (y1 - y0), dpi) * 0.92))
-    fit = fit_text(text, (x, y, w, h), base, bold, r.italic, r.spaced)
+    fit = fit_text(text, (x, y, h, w) if r.rotation else (x, y, w, h), base, bold, r.italic, r.spaced)
     if fit.truncated:
         notes.shortened.append((page.name, text))
     st = RunStyle(bold, r.italic, r.color, round(fit.tracking * fit.size * TWIPS_PER_PT))
     runs, _ = _runs_from_md(fit.text_md, fit.size, bold, notes, style_ids, st)
+    if r.rotation:
+        anchor_p.addprevious(parse_xml(_rotated_cell_xml(runs, x, y, w, h, r.rotation)))
+        anchor_p.addprevious(parse_xml(_spacer()))
+        return pic_id
     anchor_p.addprevious(parse_xml(_frame_paragraph(runs, x, y, w, h, fit.size, r.align, fit.leading)))
     return pic_id
 

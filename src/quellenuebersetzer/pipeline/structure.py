@@ -175,6 +175,16 @@ def split_structure(box, ink: np.ndarray, color: np.ndarray | None, scale: float
     def gap_at(info: dict, center: int) -> bool:
         return any(s - min_gap <= center <= e + min_gap for s, e in info["gaps"])
 
+    gaps_between = [b["a"] - a["b"] for a, b in zip(infos, infos[1:])]
+    med_gap = float(np.median(gaps_between)) if gaps_between else 0.0
+    heights = [r["b"] - r["a"] for r in infos]
+
+    def new_style_line(i: int) -> bool:
+        """Beginnt hier sichtbar etwas Neues? (größerer Abstand oder andere Schriftgröße)"""
+        gap_before = infos[i]["a"] - infos[i - 1]["b"]
+        h_prev, h_now = heights[i - 1], heights[i]
+        return gap_before > 1.6 * max(1.0, med_gap) or max(h_prev, h_now) > 1.25 * max(1, min(h_prev, h_now))
+
     groups: list[list[dict]] = [[infos[0]]]
     for i, info in enumerate(infos[1:], start=1):
         grp = groups[-1]
@@ -183,7 +193,9 @@ def split_structure(box, ink: np.ndarray, color: np.ndarray | None, scale: float
         common = [(s + e) // 2 for s, e in grp[0]["gaps"] if all(gap_at(r, (s + e) // 2) for r in grp)]
         change = (
             _differs(info["bg"], grp[-1]["bg"], 6.0)  # andere Hintergrundfarbe
-            or _differs(info["ink"], grp[-1]["ink"], 30.0)  # andere Schriftfarbe
+            # andere Schriftfarbe – nur mit Abstand oder Größenwechsel (eine in den Text eingebettete farbige
+            # Zwischenüberschrift bleibt beim Absatz, statt mitten im Wort abgeschnitten zu werden)
+            or (_differs(info["ink"], grp[-1]["ink"], 30.0) and new_style_line(i))
             # breiter als die Gruppe (rechts erst ab einem Viertel mehr – kurze erste Zeilen sind normal)
             or info["x0"] < gx0 - tol or info["x1"] > gx1 + max(tol, (gx1 - gx0) // 4)
             or info["x0"] > gx0 + tol  # links eingerückt bzw. zentriert schmaler (z. B. Überschrift)
@@ -214,7 +226,9 @@ def style_key(box, ink: np.ndarray, color: np.ndarray | None) -> str:
     band = ink[y0:y1, x0:x1] > 0
     sub = color[y0:y1, x0:x1]
     parts = []
-    for lab, step in ((_lab_median(sub[~band]), 20), (_lab_median(sub[band]), 75)):
+    # nur der Hintergrund: eine in den Text eingebettete farbige Zwischenüberschrift darf mit ihrem Absatz
+    # zusammengelegt werden (gleiche Ränder sind ohnehin Bedingung); andere Hinterlegung trennt immer
+    for lab, step in ((_lab_median(sub[~band]), 20),):
         if lab is None:
             parts.append("-")
             continue
@@ -244,6 +258,74 @@ def ensure_disjoint(regions: list[Region]) -> list[Region]:
             r.box = box
             kept.append(r)
     return sorted(kept, key=lambda r: r.order)
+
+
+def graphic_share(box, ink: np.ndarray, line_h: float) -> float:
+    """Anteil der Schwärzung in großen zusammenhängenden Linienzügen (Straßen, Flüsse, Umrisse, Schraffuren).
+
+    Text besteht aus vielen kleinen, getrennten Zeichen; eine Karte oder Zeichnung aus langen, verbundenen
+    Linien. Liegt viel Schwärzung in Zusammenhängen, die weit größer sind als eine Zeile, ist es ein Bild.
+    """
+    x0, y0, x1, y1 = box
+    sub = (ink[y0:y1, x0:x1] > 0).astype(np.uint8)
+    total = int(sub.sum())
+    if total < 200:
+        return 0.0
+    n, _labels, stats, _ = cv2.connectedComponentsWithStats(sub, connectivity=8)
+    big = 0
+    for i in range(1, n):
+        bw, bh, area = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT], stats[i, cv2.CC_STAT_AREA]
+        # groß UND dünn verzweigt (Linienzug); große gefüllte Buchstaben eines Titels zählen nicht
+        if ((bw > 5 * line_h and bh > 1.5 * line_h) or bh > 5 * line_h) and area < 0.25 * bw * bh:
+            big += int(area)
+    return big / total
+
+
+def _char_like(box, ink: np.ndarray, line_h: float) -> int:
+    """Zahl der zeichengroßen Zusammenhänge (Buchstaben) in einem Bereich."""
+    x0, y0, x1, y1 = box
+    sub = (ink[y0:y1, x0:x1] > 0).astype(np.uint8)
+    if sub.size == 0:
+        return 0
+    n, _l, stats, _ = cv2.connectedComponentsWithStats(sub, connectivity=8)
+    hs, ws = stats[1:, cv2.CC_STAT_HEIGHT], stats[1:, cv2.CC_STAT_WIDTH]
+    return int(((hs >= 0.25 * line_h) & (hs <= 1.6 * line_h) & (ws <= 2.0 * line_h)).sum())
+
+
+def color_variety(box, color: np.ndarray | None) -> float:
+    """Anteil der Fläche, der nicht die vorherrschende Farbe hat (Schrift herausgefiltert).
+
+    Ein Textblock – auch ein farbiger Kasten – ist bis auf die Schrift einfarbig (nahe 0); ein Plan hat
+    Straßen, Wasser, Grünflächen, Symbole (deutlich darüber).
+    """
+    if color is None:
+        return 0.0
+    x0, y0, x1, y1 = box
+    sub = color[y0:y1, x0:x1]
+    if sub.size == 0:
+        return 0.0
+    f = max(1, round(sub.shape[1] / 300))
+    small = cv2.resize(sub, None, fx=1 / f, fy=1 / f, interpolation=cv2.INTER_AREA)
+    if min(small.shape[:2]) < 10:
+        return 0.0
+    smooth = cv2.medianBlur(cv2.medianBlur(small, 7), 7)
+    lab = cv2.cvtColor(smooth, cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float32)
+    dominant = np.median(lab, axis=0)
+    return float((np.linalg.norm(lab - dominant, axis=1) > 12).mean())
+
+
+def is_drawing(box, ink: np.ndarray, color: np.ndarray | None, line_h: float) -> bool:
+    """Zeichnung, Karte oder Plan statt Text: große Linienzüge oder viele Farbflächen bei geringer Schriftdichte."""
+    if graphic_share(box, ink, line_h) > 0.35:
+        return True
+    area = max(1, _area(box))
+    density = _char_like(box, ink, line_h) * line_h * line_h / area  # Text ≥ 0,15, Pläne ≤ 0,03
+    return color_variety(box, color) > 0.22 and density < 0.08
+
+
+def _crop_ink(ink: np.ndarray, box) -> np.ndarray:
+    x0, y0, x1, y1 = box
+    return ink[y0:y1, x0:x1] > 0
 
 
 def _assign_containers(regions: list[Region], boxes: dict[str, Panel], ink: np.ndarray) -> list[Region]:
@@ -298,10 +380,15 @@ def _margin_rules(regions: list[Region], w: int, h: int) -> None:
     top, bottom = min(r.box[1] for r in body), max(r.box[3] for r in body)
     tol = int(0.01 * w)
     for r in regions:
-        if r.container or r.kind not in ("absatz", "kopfzeile", "fusszeile", "randnotiz"):
+        if r.container or r.kind not in ("absatz", "kopfzeile", "fusszeile", "randnotiz", "fussnote"):
             continue
         narrow = r.box[2] - r.box[0] < 0.25 * w
         outside = r.box[2] <= bx0 + tol or r.box[0] >= bx1 - tol
+        if r.kind == "fussnote":
+            if r.box[1] > 0.6 * h:
+                continue  # Fußnoten stehen im unteren Teil der Seite
+            r.kind = "randnotiz" if narrow and outside else "absatz"
+            continue
         if narrow and outside:
             r.kind = "randnotiz"
         elif r.kind == "kopfzeile" and r.box[3] > top + tol:
@@ -373,14 +460,32 @@ def build(raw: list[Region], feats: PageFeatures, ink: np.ndarray,
     """Endgültige Bereiche und Kästen (Dekorationen) einer Seite."""
     w, h = feats.width, feats.height
     scale = w / 2480.0
+    # Zeichnungen und Karten, die das Modell für Text hält, bleiben Bilder (große Linienzüge statt Zeichen)
+    row_hs = [b - a for r in raw if r.kind in TEXT_SPLIT_KINDS
+              for a, b in _text_rows(_crop_ink(ink, r.box))]
+    line_h = float(np.median(row_hs)) if row_hs else 40.0 * scale
+    for r in raw:
+        if (r.kind not in FIGURE_KINDS and r.kind != "tabelle" and _area(r.box) > (6 * line_h) ** 2
+                and is_drawing(r.box, ink, color, line_h)):
+            r.kind = "abbildung"
     figures = [r for r in raw if r.kind in FIGURE_KINDS]
 
     # 1. Kästen: Flächen, die nicht Abbildung und nicht Tabellenraster sind
     boxes: dict[str, Panel] = {}
     grids: list[Panel] = []
     for p in feats.panels:
-        if any(_iou(p.box, f.box) > 0.4 or (_inter(p.box, f.box) and _area(_inter(p.box, f.box)) > 0.7 * _area(p.box))
-               for f in figures):
+        hits = [f for f in figures if _iou(p.box, f.box) > 0.4
+                or (_inter(p.box, f.box) and _area(_inter(p.box, f.box)) > 0.7 * _area(p.box))]
+        whole = [f for f in hits if _iou(p.box, f.box) > 0.6]  # die Farbfläche IST die „Abbildung“
+        if (whole and len(whole) == len(hits) and p.source == "farbe" and p.fill
+                and len(_text_rows(_crop_ink(ink, p.box))) >= 2
+                and not any(is_drawing(f.box, ink, color, line_h) for f in whole)):
+            # einfarbiger Textkasten ist kein Bild, auch wenn das Modell es meint
+            for f in whole:
+                f.kind = "absatz"
+            figures = [f for f in figures if f not in whole]
+            hits = []
+        if hits:
             continue
         if p.grid:
             grids.append(p)
@@ -412,8 +517,9 @@ def build(raw: list[Region], feats: PageFeatures, ink: np.ndarray,
             pad = max(4, p.stroke_px * 2)
             inner = (p.box[0] + pad, p.box[1] + pad, p.box[2] - pad, p.box[3] - pad)
             found = _shrink_to_ink(inner, ink)
-            if found or p.dark:
-                regions.append(Region("absatz", found or inner, 0.5, 10_000, kid))
+            if (found and _char_like(found, ink, line_h) >= 5 and len(_text_rows(_crop_ink(ink, found))) >= 1
+                    and found[2] - found[0] >= 2 * line_h):
+                regions.append(Region("absatz", found, 0.5, 10_000, kid))
 
     # 4. Struktur: an Wechseln von Breite, Spaltenaufteilung und Farbe waagrecht teilen, dann an Spaltenlücken
     split: list[Region] = []
@@ -435,6 +541,8 @@ def build(raw: list[Region], feats: PageFeatures, ink: np.ndarray,
     line_px = float(np.median(row_hs)) * 1.6 if row_hs else None  # Zeilenhöhe samt Durchschuss
     regions = ensure_disjoint(resolve_overlaps(merge_lines(split, line_px)))
     _margin_rules(regions, w, h)
+    # Randnotizen entstehen teils erst durch die Lage – ihre Teile jetzt zusammenführen
+    regions = ensure_disjoint(merge_lines(regions, line_px))
     regions = _read_order(regions, boxes)
     decorations = []
     for kid, p in boxes.items():

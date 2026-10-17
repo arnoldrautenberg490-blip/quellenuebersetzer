@@ -47,8 +47,9 @@ class Panel:
     stroke: str = ""  # Rahmenfarbe (Hex), leer = kein Rahmen
     dash: str = ""  # solid | dashed | dotted
     stroke_px: int = 0
-    dark: bool = False  # dunkler Grund (helle Schrift zu erwarten)
+    dark: bool = False  # helle Schrift auf dem Grund (gemessen: Weiß auf Rot, Blau, Grau …)
     grid: bool = False  # enthält ein Linienraster (Tabelle)
+    source: str = "kanten"  # kanten (Rahmen/Farbkanten) | farbe (formunabhängige Farbfläche)
 
 
 @dataclass
@@ -265,7 +266,7 @@ def detect_panels(color: np.ndarray, rules: list[Rule], paper_lab: np.ndarray) -
     # Kanten aus Linien (Rahmen) und aus Farbflächen
     hs = [(r.pos, r.x0, r.x1) for r in rules if r.orient == "h"]
     vs = [(r.pos, r.y0, r.y1) for r in rules if r.orient == "v"]
-    fh, fv = _fill_edges(color, 4)
+    fh, fv = _fill_edges(color, max(1, round(w / 620)))
     rects = _edges_to_rects(hs + fh, vs + fv, tol, min_w, min_h)
     panels: list[Panel] = []
     for (x0, y0, x1, y1) in rects:
@@ -309,9 +310,9 @@ def detect_panels(color: np.ndarray, rules: list[Rule], paper_lab: np.ndarray) -
             stroke_px = int(np.median([r.thickness for r in frame]))
         elif not filled:
             continue
-        lightness = float(bg_lab[0]) * 100 / 255
+        light_text = filled and light_text_on(cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY))
         panels.append(Panel((x0, y0, x1, y1), hexcolor(bg) if filled else "", stroke, dash, stroke_px,
-                            dark=lightness < 45, grid=grid))
+                            dark=light_text, grid=grid))
     # Verschachtelte Doppelungen (Rahmen- und Farbkante desselben Kastens) zusammenfassen;
     # Teilrechtecke eines Gitters (Zeilen einer Tabelle) gehören zum ganzen Gitter
     out: list[Panel] = []
@@ -338,6 +339,77 @@ def paper_color(color: np.ndarray) -> np.ndarray:
     return np.median(small.reshape(-1, 3), axis=0)
 
 
+# --------------------------------------------------------------------------- Farbflächen (formunabhängig)
+
+
+def light_text_on(gray_crop: np.ndarray) -> bool:
+    """Ist die Schrift auf dieser Fläche heller als der Grund? (Weiß auf Rot, Grün, Blau, Grau …)
+
+    Gemessen statt aus der Helligkeit des Grundes geschlossen: Schriftpixel sind die Minderheit, die sich
+    deutlich vom Median abhebt – nach oben (helle Schrift) oder nach unten (dunkle Schrift).
+    """
+    if gray_crop.size == 0:
+        return False
+    med = float(np.median(gray_crop))
+    lighter = float((gray_crop > med + 40).mean())
+    darker = float((gray_crop < med - 40).mean())
+    return lighter > darker and lighter > 0.005
+
+
+def detect_color_regions(color: np.ndarray, factor: int | None = None) -> list[Panel]:
+    """Farbig hinterlegte Flächen jeder Form und Lage – auch randabfallend, abgerundet oder direkt an einer
+    andersfarbigen Fläche.
+
+    Die Schrift wird herausgefiltert (zweifacher Median auf dem verkleinerten Bild, egal ob dunkel oder hell),
+    dann wird das Bild an Farbkanten in einheitliche Flächen zerlegt. Die größte Fläche ist das Papier; jede
+    andere große, einheitliche Fläche, die sich vom Papier daneben unterscheidet, ist ein Block.
+    """
+    h, w = color.shape[:2]
+    factor = factor or max(1, round(w / 620))  # Arbeitsbild etwa 620 Pixel breit – unabhängig von der Auflösung
+    small = cv2.resize(color, None, fx=1 / factor, fy=1 / factor, interpolation=cv2.INTER_AREA)
+    smooth = cv2.medianBlur(cv2.medianBlur(small, 9), 9)
+    lab = _lab(smooth)
+    grad = np.zeros(lab.shape[:2], np.float32)
+    kernel = np.ones((3, 3), np.uint8)
+    for ch in range(3):
+        grad = np.maximum(grad, cv2.morphologyEx(lab[..., ch], cv2.MORPH_GRADIENT, kernel))
+    uniform = (cv2.dilate((grad > 4).astype(np.uint8), kernel) == 0).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(uniform, connectivity=4)
+    if n <= 1:
+        return []
+    paper_id = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    paper_mask = labels == paper_id
+    s = _scale(w)
+    min_area = (250 * s / factor) * (110 * s / factor)
+    gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+    panels: list[Panel] = []
+    for i in range(1, n):
+        if i == paper_id:
+            continue
+        x, y, bw, bh, area = (int(v) for v in stats[i])
+        if area < min_area:
+            continue
+        mask = (labels[y:y + bh, x:x + bw] == i).astype(np.uint8)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        filled = sum(cv2.contourArea(c) for c in contours)
+        if filled < 0.55 * bw * bh:
+            continue  # verästelte Fläche (z. B. Teil eines Fotos), kein Block
+        region = lab[y:y + bh, x:x + bw][mask > 0]
+        own = np.median(region, axis=0)
+        # Papier in der Umgebung (unempfindlich gegen Vergilbung und Schatten)
+        ring = 12
+        ry0, ry1, rx0, rx1 = max(0, y - ring), min(lab.shape[0], y + bh + ring), max(0, x - ring), min(lab.shape[1], x + bw + ring)
+        near = lab[ry0:ry1, rx0:rx1][paper_mask[ry0:ry1, rx0:rx1]]
+        paper_lab = np.median(near, axis=0) if len(near) > 30 else np.median(lab[paper_mask], axis=0)
+        if float(np.linalg.norm(own - paper_lab)) < 6:
+            continue
+        box = (x * factor, y * factor, min(w, (x + bw) * factor), min(h, (y + bh) * factor))
+        bgr = np.median(smooth[y:y + bh, x:x + bw][mask > 0], axis=0)
+        sub = gray[box[1]:box[3], box[0]:box[2]]
+        panels.append(Panel(box, hexcolor(bgr), dark=light_text_on(sub), source="farbe"))
+    return panels
+
+
 def text_ink(gray: np.ndarray, feats: PageFeatures) -> np.ndarray:
     """Schriftpixel ohne Linien – auf dunklem Grund wird die helle Schrift gesucht."""
     ink = ink_mask(gray)
@@ -350,12 +422,46 @@ def text_ink(gray: np.ndarray, feats: PageFeatures) -> np.ndarray:
     return ink
 
 
+def _merge_panels(framed: list[Panel], colored: list[Panel]) -> list[Panel]:
+    """Kästen aus Kanten (mit Rahmenart) und Farbflächen zusammenführen – dieselbe Fläche nur einmal."""
+    out = []
+    for p in framed:
+        if not p.stroke and not p.grid:
+            # rahmenloses „Rechteck“, das in Wahrheit aus mehreren aneinanderstoßenden Farbflächen besteht
+            parts = [c for c in colored if _inside_box(c.box, p.box, 16)]
+            covered = sum((c.box[2] - c.box[0]) * (c.box[3] - c.box[1]) for c in parts)
+            if len(parts) >= 2 and covered > 0.7 * (p.box[2] - p.box[0]) * (p.box[3] - p.box[1]):
+                continue
+        out.append(p)
+    for c in colored:
+        same = next((p for p in out if _box_iou(p.box, c.box) > 0.7), None)
+        if same is not None:
+            same.fill = same.fill or c.fill
+            same.dark = same.dark or c.dark
+            continue
+        # Fläche ganz in einem Linienraster (Zebrazeile, hinterlegte Spalte) übernimmt die Tabelle
+        out.append(c)
+    return out
+
+
+def _inside_box(inner, outer, tol: int) -> bool:
+    return (inner[0] >= outer[0] - tol and inner[1] >= outer[1] - tol and inner[2] <= outer[2] + tol
+            and inner[3] <= outer[3] + tol)
+
+
+def _box_iou(a, b) -> float:
+    x0, y0, x1, y1 = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, x1 - x0) * max(0, y1 - y0)
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union else 0.0
+
+
 def analyse(color: np.ndarray) -> PageFeatures:
     h, w = color.shape[:2]
     gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
     paper = paper_color(color)
     rules, mask = extract_rules(ink_mask(gray), color)
     paper_lab = _lab(paper.reshape(1, 1, 3).astype(np.uint8))[0, 0]
-    panels = detect_panels(color, rules, paper_lab)
+    panels = _merge_panels(detect_panels(color, rules, paper_lab), detect_color_regions(color))
     mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
     return PageFeatures(w, h, tuple(int(v) for v in paper), rules, panels, mask)

@@ -75,8 +75,19 @@ def is_artifact(token: str) -> bool:
     return bool(t) and not re.search(r"\w", t) and t not in KEEP_SYMBOLS
 
 
+def _symbol_ok(word: Word, first: bool) -> bool:
+    """Allein stehende Zeichen ohne Buchstaben nur mit Beleg: Striche sicher gelesen, Sternchen/Kreuze als
+    Fußnotenzeichen am Zeilenanfang oder sehr sicher – sonst ist es fast immer Rauschen."""
+    if re.search(r"\w", word.text):
+        return True
+    if word.text in ("-", "–", "—", "/", "&", "%", "§"):
+        return word.conf >= 60
+    return (first and word.conf >= 60) or word.conf >= 90
+
+
 def clean_line(line: Line) -> Line | None:
-    words = [w for w in line.words if not is_artifact(w.text)]
+    # Einzelzeichen wie „—“ oder „*“ nur, wenn sicher gelesen (sonst meist Rauschen am Rand einer Fläche)
+    words = [w for i, w in enumerate(line.words) if not is_artifact(w.text) and _symbol_ok(w, i == 0)]
     if not words:
         return None
     bbox = (min(w.bbox[0] for w in words), min(w.bbox[1] for w in words),
@@ -117,6 +128,32 @@ def _reading_order_words(words: list[Word]) -> list[Word]:
     return [w for row in rows for w in sorted(row, key=lambda w: w.bbox[0])]
 
 
+def _word_share(lines: list[Line]) -> float:
+    """Anteil echter Wörter (mindestens drei Buchstaben) an allen Lesungen."""
+    tokens = [w.text for ln in lines for w in ln.words]
+    if not tokens:
+        return 0.0
+    return sum(1 for t in tokens if re.search(r"[^\W\d_]{3,}", t)) / len(tokens)
+
+
+def _rotation_wins(rotated: list[Line], horizontal: list[Line]) -> bool:
+    """Gedrehte Lesung übernehmen? Sie muss ordentlich sicher sein und echte Wörter ergeben – waagrecht gelesene
+    gedrehte Großbuchstaben ergeben viele einzelne „Buchstaben“ mit hoher Sicherheit, aber keine Wörter."""
+    if not rotated or _mean_conf(rotated) < 65 or _word_share(rotated) < 0.6:
+        return False
+    return _word_share(rotated) >= _word_share(horizontal) + 0.3 or _mean_conf(rotated) > _mean_conf(horizontal) + 15
+
+
+def _odd_word(text: str) -> bool:
+    """Sieht wie eine Fehllesung fremder Schrift aus? Ziffern mitten in Buchstaben, ungewöhnliche Zeichen."""
+    core = text.strip(".,;:()[]\"'„“”‚‘’!?-–—")
+    if not core:
+        return False
+    if re.search(r"[»«¢§©®°±µ¶·¿|\{}<>~^`@#$%&*=+]", core):
+        return True
+    return bool(re.search(r"\d", core) and re.search(r"[^\W\d_]", core))
+
+
 def _ocr_score(lines: list[Line]) -> float:
     """Summe der Sicherheit echter Wörter – bevorzugt Varianten mit mehr *und* sichereren Wörtern."""
     return sum(w.conf for ln in lines for w in ln.words if re.search(r"\w", w.text))
@@ -137,6 +174,8 @@ def garbage_ratio(text: str) -> float:
         core = re.sub(r"[^\w]", "", t)
         if not core or core.isdigit() or re.fullmatch(r"[ivxlcdmIVXLCDM]+", core):
             continue
+        if re.search(r"[֐-׿Ѐ-ӿ]", core):
+            continue  # hebräische, jiddische, kyrillische Wörter: Vokalprüfung gilt nur für lateinische Schrift
         letters = re.sub(r"[\d_]", "", core)
         if (len(core) >= 3 and not (set(core) & VOWELS)) or (letters and re.search(r"\d", core) and len(core) > 3):
             bad += 1
@@ -182,8 +221,12 @@ def normalize_panel(color: np.ndarray, fill_hex: str) -> np.ndarray:
 
 
 class LayoutReader(PageReader):
-    def __init__(self, *args, detector: LayoutDetector, workdir: Path, workers: int = 1, **kwargs):
+    def __init__(self, *args, detector: LayoutDetector, workdir: Path, workers: int = 1,
+                 extra_scripts: list[str] | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        # weitere Schriften (z. B. Hebräisch, Jiddisch, Russisch) nur zum Nachlesen unsicherer Zeilen
+        self.extra_scripts = [s for s in (extra_scripts or [])
+                              if self.tesseract and (self.tesseract.tessdata / f"{s}.traineddata").exists()]
         self.detector = detector
         self.workdir = workdir
         self.workers = max(1, workers)  # Seiten gleichzeitig (Prozessorkerne)
@@ -253,7 +296,14 @@ class LayoutReader(PageReader):
             if not d.get("fill"):
                 continue
             x0, y0, x1, y1 = d["box"]
-            enhanced[y0:y1, x0:x1] = enhance(normalize_panel(color[y0:y1, x0:x1], d["fill"]))
+            patch = enhance(normalize_panel(color[y0:y1, x0:x1], d["fill"]))
+            # Randstreifen der Fläche weiß: der Übergang zur Umgebung ist keine Schrift
+            edge = max(4, int(8 * gray.shape[1] / 2480))
+            patch[:edge, :] = 255
+            patch[-edge:, :] = 255
+            patch[:, :edge] = 255
+            patch[:, -edge:] = 255
+            enhanced[y0:y1, x0:x1] = patch
         binary = binarize(enhanced)
         if feats.line_mask is not None:
             binary[feats.line_mask > 0] = 255  # Linien sind Grafik, kein Text
@@ -264,6 +314,8 @@ class LayoutReader(PageReader):
             x0, y0, x1, y1 = lr.box
             covered[y0:y1, x0:x1] = True
             if lr.kind in IMAGE_KINDS:
+                if self._tall(lr) and self.tesseract and self.kind != SourceKind.HANDSCHRIFT:
+                    self._image_as_rotated_text(work, lr, enhanced, binary)
                 continue
             if lr.kind == "tabelle":
                 self._analyse_table(work, lr, enhanced, binary)
@@ -297,12 +349,28 @@ class LayoutReader(PageReader):
                             bx = _trim_box(bx, r.box)
                     if bx is None:
                         continue  # liegt in einem erkannten Bereich – dessen Lesung enthält den Text
+                    probe = LRegion("", "absatz", bx, 0)
+                    if self._tall(probe):
+                        # hoch und schmal: vielleicht gedrehte Schrift, die waagrecht nur Einzelbuchstaben ergibt
+                        rotated = self._read_rotated(work, probe, enhanced, binary)
+                        if rotated is not None and _rotation_wins(rotated[0], g):
+                            rid = f"s{lpage.number}b{len(lpage.regions) + 1}"
+                            lr = LRegion(rid, "titel", bx, len(lpage.regions))
+                            self._use_rotated(work, lr, *rotated)
+                            lpage.regions.append(lr)
+                            caught += 1
+                            continue
+                    if self._attach_to_neighbour(work, lpage, g, bx, enhanced):
+                        caught += 1
+                        continue
                     center = ((bx[0] + bx[2]) / 2, (bx[1] + bx[3]) / 2)
                     container = next((d["id"] for d in lpage.decorations
                                       if d["box"][0] <= center[0] <= d["box"][2]
                                       and d["box"][1] <= center[1] <= d["box"][3]), "")
                     at_margin = center[0] < w * 0.15 or center[0] > w * 0.85
                     kind = "randnotiz" if at_margin and not container and _mean_conf(g) >= 60 else "absatz"
+                    if self.extra_scripts:
+                        g = [self._reread_scripts(l, binary, eager=True) for l in g]
                     rid = f"s{lpage.number}b{len(lpage.regions) + 1}"
                     lr = LRegion(rid, kind, bx, len(lpage.regions), container=container)
                     lpage.regions.append(lr)
@@ -317,9 +385,208 @@ class LayoutReader(PageReader):
                 if caught:
                     lpage.issues.append(f"{caught} Textstelle(n) lagen außerhalb der erkannten Bereiche "
                                         "und wurden nachträglich aufgenommen – Lesereihenfolge prüfen.")
+        if self.tesseract and self.kind != SourceKind.HANDSCHRIFT:
+            self._collect_unclaimed(work, lpage, enhanced, binary)
         work.items = [it for its in work.region_items.values() for it in its]
         work.tables = [(t, cells) for t, cells in work.region_tables.values()]
         return work
+
+    def _collect_unclaimed(self, work: LayoutWork, lpage: LPage, enhanced, binary) -> None:
+        """Vollständigkeit: größere Schwärzungen außerhalb aller Bereiche (z. B. ein senkrechter Titel, den das
+        Layoutmodell übersehen hat) gehen nicht verloren – gedreht lesbar als Titel, sonst als Bild."""
+        h, w = binary.shape
+        scale = w / 2480
+        ink = (binary < 128).astype(np.uint8)
+        for r in lpage.regions:
+            x0, y0, x1, y1 = r.box
+            ink[max(0, y0 - 6):y1 + 6, max(0, x0 - 6):x1 + 6] = 0
+        for d in lpage.decorations:
+            x0, y0, x1, y1 = d["box"]
+            ink[y0:y1, x0:x1] = 0
+        if ink.sum() < 2000 * scale * scale:
+            return
+        grown = cv2.dilate(ink, cv2.getStructuringElement(cv2.MORPH_RECT, (int(25 * scale) | 1, int(25 * scale) | 1)))
+        n, _labels, stats, _ = cv2.connectedComponentsWithStats(grown, connectivity=8)
+        min_side = int(60 * scale)
+        for i in range(1, n):
+            x, y, bw, bh, _a = (int(v) for v in stats[i])
+            box = (x, y, x + bw, y + bh)
+            if min(bw, bh) < min_side or int(ink[y:y + bh, x:x + bw].sum()) < 1500 * scale * scale:
+                continue
+            for r in lpage.regions:
+                if box and _overlaps(box, r.box):
+                    box = _trim_box(box, r.box)
+            if box is None or min(box[2] - box[0], box[3] - box[1]) < min_side:
+                continue
+            rid = f"s{lpage.number}b{len(lpage.regions) + 1}"
+            lr = LRegion(rid, "abbildung", box, len(lpage.regions))
+            # zuerst als Text versuchen (z. B. eine übersehene Seitenleiste mit Namensformen)
+            lines = self._ocr_region(box, binary, enhanced, 6, work.feats.line_mask if work.feats else None)
+            if self.extra_scripts:
+                lines = [self._reread_scripts(ln, binary, eager=True) for ln in lines]
+            if lines and _mean_conf(lines) >= 55 and _word_share(lines) >= 0.4:
+                center = (box[0] + box[2]) / 2
+                lr.kind = "randnotiz" if center < w * 0.2 or center > w * 0.8 else "absatz"
+                work.region_items[rid] = [
+                    Item(crop(enhanced, ln.bbox, pad=8), line=ln, bbox=ln.bbox, group=(0, 0),
+                         need_second=self.strict or ln.min_conf < fusion.CONF_SECOND) for ln in lines]
+                lr.lines, lr.conf = len(lines), _mean_conf(lines)
+                lr.line_px = statistics.median(ln.height for ln in lines)
+                lr.erase_boxes = [ln.bbox for ln in lines]
+                lpage.regions.append(lr)
+                continue
+            if self._tall(lr):
+                rotated = self._read_rotated(work, lr, enhanced, binary)
+                if rotated is not None and _rotation_wins(rotated[0], []):
+                    lr.kind = "titel"
+                    self._use_rotated(work, lr, *rotated)
+                    lpage.regions.append(lr)
+                    continue
+            name = f"abbildung-{rid}.png"
+            if work.color is not None:
+                save_png(crop(work.color, box, pad=0), self.workdir / name)
+                lr.image = name
+            lpage.regions.append(lr)
+            lpage.issues.append("Hinweis: Eine Grafik oder Schrift außerhalb der erkannten Bereiche wurde als Bild "
+                                "übernommen.")
+
+    def _attach_to_neighbour(self, work: LayoutWork, lpage: LPage, lines: list[Line], bx, enhanced) -> bool:
+        """Aufgefangenen Text einem Bereich direkt darüber oder darunter mit gleichem linkem Rand zuschlagen
+        (z. B. die Überschrift einer Seitenleiste) – statt eines eigenen Splitters. Nur ohne Überlappung."""
+        line_h = statistics.median(l.height for l in lines)
+        for r in lpage.regions:
+            if r.kind not in ("absatz", "randnotiz") or r.id not in work.region_items or r.rotation:
+                continue
+            if abs(r.box[0] - bx[0]) > 1.5 * line_h:
+                continue
+            below = 0 <= r.box[1] - bx[3] <= 1.5 * line_h  # aufgefangener Text steht darüber
+            above = 0 <= bx[1] - r.box[3] <= 1.5 * line_h
+            if not (below or above):
+                continue
+            union = (min(r.box[0], bx[0]), min(r.box[1], bx[1]), max(r.box[2], bx[2]), max(r.box[3], bx[3]))
+            if any(o is not r and _overlaps(union, o.box) for o in lpage.regions):
+                continue
+            items = [Item(crop(enhanced, l.bbox, pad=8), line=l, bbox=l.bbox, group=(0, 0),
+                          need_second=self.strict or l.min_conf < fusion.CONF_SECOND) for l in lines]
+            work.region_items[r.id] = items + work.region_items[r.id] if below else work.region_items[r.id] + items
+            r.box = union
+            r.lines += len(lines)
+            r.erase_boxes = (r.erase_boxes or []) + [l.bbox for l in lines]
+            return True
+        return False
+
+    # ------------------------------------------------------------------ gedrehte Schrift, weitere Schriften
+    @staticmethod
+    def _tall(lr: LRegion) -> bool:
+        x0, y0, x1, y1 = lr.box
+        return (y1 - y0) >= 2.0 * max(1, x1 - x0) and (y1 - y0) >= 120
+
+    def _read_rotated(self, work: LayoutWork, lr: LRegion, enhanced, binary):
+        """Bereich um 90° in beide Richtungen gedreht lesen; → (Zeilen, Drehung, gedrehter Ausschnitt) oder None."""
+        box = self._grow_along(lr.box, binary)
+        sub_b = crop(binary, box, pad=6)
+        sub_e = crop(enhanced, box, pad=6)
+        best = None
+        for rotation, code in ((90, cv2.ROTATE_90_CLOCKWISE), (270, cv2.ROTATE_90_COUNTERCLOCKWISE)):
+            rb = cv2.rotate(sub_b, code)
+            psm = 7 if rb.shape[0] < 220 else 6
+            lines = [ln for ln in (clean_line(x) for x in self.tesseract.run_tsv(rb, self.langs, psm=psm).lines) if ln]
+            if best is None or _ocr_score(lines) > _ocr_score(best[0]):
+                best = (lines, rotation, cv2.rotate(sub_e, code), code, box)
+        if best is None or not best[0] or _mean_conf(best[0]) < 60:
+            return None
+        return best
+
+    @staticmethod
+    def _grow_along(box, binary) -> tuple[int, int, int, int]:
+        """Hohen Bereich nach oben und unten erweitern, solange dort Schrift anschließt (knapp erkannte Titel)."""
+        x0, y0, x1, y1 = box
+        h = binary.shape[0]
+        limit = int(0.2 * (y1 - y0))
+        gap = max(8, (x1 - x0) // 6)
+
+        def has_ink(y: int) -> bool:
+            return bool((binary[y, x0:x1] < 128).sum() > 2)
+
+        top, empty = y0, 0
+        while top > max(0, y0 - limit) and empty < gap:
+            top -= 1
+            empty = 0 if has_ink(top) else empty + 1
+        bottom, empty = y1, 0
+        while bottom < min(h - 1, y1 + limit) and empty < gap:
+            bottom += 1
+            empty = 0 if has_ink(bottom) else empty + 1
+        return x0, top, x1, bottom
+
+    def _use_rotated(self, work: LayoutWork, lr: LRegion, lines, rotation: int, rot_enh, code, box) -> None:
+        lr.rotation = rotation
+        lr.box = box  # ganzer Titel (das Modell schneidet hohe Schrift oft knapp ab)
+        items = [Item(crop(rot_enh, ln.bbox, pad=8), line=Line(ln.words, lr.box, ln.block, ln.par), bbox=lr.box,
+                      group=(0, 0), need_second=self.strict or ln.min_conf < fusion.CONF_SECOND) for ln in lines]
+        work.region_items[lr.id] = items
+        lr.lines = len(lines)
+        lr.conf = _mean_conf(lines)
+        lr.line_px = statistics.median(ln.height for ln in lines)
+        lr.erase_boxes = [lr.box]
+        if work.color is not None:
+            rc = cv2.rotate(crop(work.color, lr.box, pad=6), code)
+            rb = cv2.rotate(crop(work.binary, lr.box, pad=6), code)
+            style = measure_style(rc, rb, lr.line_px)
+            lr.color, lr.italic, lr.spaced, lr.stroke = style.color, style.italic, style.spaced, style.stroke
+
+    def _image_as_rotated_text(self, work: LayoutWork, lr: LRegion, enhanced, binary) -> None:
+        """Eine „Abbildung“, die in Wahrheit gedrehte Schrift ist (senkrechter Titel am Rand), wird gelesen."""
+        # Entscheidend ist allein die gedrehte Lesung: nur bei hoher Sicherheit und echten Wörtern ist es Schrift
+        # (eine Zeichnung ergibt gedreht keine sicheren Wörter)
+        rotated = self._read_rotated(work, lr, enhanced, binary)
+        if rotated is None or not _rotation_wins(rotated[0], []):
+            return
+        lr.kind = "titel"
+        lr.image = ""
+        self._use_rotated(work, lr, *rotated)
+
+    def _reread_scripts(self, line: Line, binary, eager: bool = False) -> Line:
+        """Zeile mit weiteren Schriften nachlesen (Hebräisch, Jiddisch, Russisch) und Wort für Wort die sicherste
+        Lesung übernehmen – so wird „KpakoB“ zu „Краков“, „(ros.)“ bleibt lateinisch.
+
+        ``eager``: schon bei einem einzelnen unsicheren Wort (Randspalten, Namenslisten); sonst nur bei
+        insgesamt unsicherer Zeile (Fließtext – spart Zeit).
+        """
+        weakest = min((w.conf for w in line.words), default=100.0)
+        suspicious = any(_odd_word(w.text) for w in line.words)
+        if (eager and weakest >= 75 and not suspicious) or (not eager and _mean_conf([line]) >= 70 and not suspicious):
+            return line
+        sub = crop(binary, line.bbox, pad=6)
+        if sub.size == 0:
+            return line
+        dx, dy = max(0, line.bbox[0] - 6), max(0, line.bbox[1] - 6)
+        candidates: list[Word] = []
+        for script in self.extra_scripts:  # jede Schrift einzeln mit Polnisch (Klammerzusätze bleiben lesbar)
+            for x in self.tesseract.run_tsv(sub, [script, "pol"], psm=7).lines:
+                c = clean_line(_offset_line(x, dx, dy))
+                if c:
+                    candidates.extend(c.words)
+        if not candidates:
+            return line
+
+        def overlap(a: Word, b: Word) -> float:
+            inter = min(a.bbox[2], b.bbox[2]) - max(a.bbox[0], b.bbox[0])
+            return inter / max(1, min(a.bbox[2] - a.bbox[0], b.bbox[2] - b.bbox[0]))
+
+        def own_script(word: Word) -> bool:
+            letters = [ch for ch in word.text if ch.isalpha()]
+            foreign = [ch for ch in letters if "֐" <= ch <= "׿" or "Ѐ" <= ch <= "ӿ"]
+            return len(foreign) >= 2 and len(foreign) >= 0.6 * len([ch for ch in word.text if ch.isalnum()])
+
+        candidates = [c for c in candidates if own_script(c) or not re.search(r"[֐-׿Ѐ-ӿ]", c.text)]
+        words = []
+        for w in line.words:
+            rivals = [c for c in candidates if overlap(w, c) > 0.6]
+            best = max(rivals + [w], key=lambda x: x.conf)
+            words.append(best if best.conf >= w.conf + 10 else w)
+        if words == line.words:
+            return line
+        return Line(words, line.bbox, line.block, line.par)
 
     def _ocr_region(self, box, binary, enhanced, psm: int, line_mask: np.ndarray | None = None) -> list[Line]:
         """Bereich lesen; bei schwacher Sicherheit zweite Bildvariante (Otsu) versuchen, bessere behalten."""
@@ -354,6 +621,17 @@ class LayoutReader(PageReader):
         psm = 7 if lr.kind in SINGLE_LINE_KINDS and (y1 - y0) < 140 else 6
         mask = work.feats.line_mask if work.feats else None
         lines = self._ocr_region(lr.box, binary, enhanced, psm, mask) if self.tesseract else []
+        if self.tesseract and self._tall(lr) and _mean_conf(lines) < 75:
+            # hoch und schmal, waagrecht schlecht lesbar → gedreht versuchen
+            rotated = self._read_rotated(work, lr, enhanced, binary)
+            # Vergleich der durchschnittlichen Sicherheit: eine waagrechte Fehllesung aus vielen Pseudo-Wörtern
+            # hätte sonst die höhere Summe
+            if rotated is not None and _rotation_wins(rotated[0], lines):
+                self._use_rotated(work, lr, *rotated)
+                return
+        if self.tesseract and self.extra_scripts:
+            eager = lr.kind in ("randnotiz", "kopfzeile", "fusszeile", "bildunterschrift", "titel")
+            lines = [self._reread_scripts(ln, binary, eager) for ln in lines]
         items = [Item(crop(enhanced, ln.bbox, pad=8), line=ln, bbox=ln.bbox, group=(0, 0),
                       need_second=self.strict or ln.min_conf < fusion.CONF_SECOND) for ln in lines]
         if not lines and (crop(binary, lr.box, pad=0) < 128).mean() > 0.01:
@@ -598,11 +876,24 @@ class LayoutReader(PageReader):
             for r in w.lpage.regions:
                 self._check_structure(w, r)
                 self._quality_gate(r)
+                if r.rotation and not r.keep_original and len(unescape_md(markup_plain(r.source_md)).split()) <= 6:
+                    r.keep_original = True  # gedrehter Titel = Eigenname: Original bleibt stehen
+                    r.kind = "titel"
         # fett = deutlich kräftiger als der übliche Text dieser Seite (z. B. fette Zwischenüberschriften)
         # nur Bereiche mit genug Text vergleichen (Seitenzahlen o. ä. geben kein verlässliches Strichbild)
         texts = [r for r in w.lpage.regions if r.is_text and len(markup_plain(r.source_md)) >= 8]
         for r, is_bold in zip(texts, bold_flags([r.stroke for r in texts])):
             r.bold = r.bold or is_bold
+        # deutlich größere Schrift in einem kurzen Bereich = Überschrift (auch auf farbigem Grund, wo sich
+        # Fettdruck schlecht messen lässt)
+        body = [r.line_px for r in w.lpage.regions if r.kind == "absatz" and r.lines >= 3 and r.line_px > 0]
+        if body:
+            normal = statistics.median(body)
+            for r in w.lpage.regions:
+                if (r.kind == "absatz" and 0 < r.lines <= 2 and r.line_px >= 1.35 * normal
+                        and len(markup_plain(r.source_md).split()) <= 12):
+                    r.kind = "ueberschrift"
+                    r.bold = True
         return w.lpage
 
     def _check_structure(self, w: LayoutWork, r: LRegion) -> None:
@@ -627,8 +918,10 @@ class LayoutReader(PageReader):
         ratio = garbage_ratio(text)
         n = len(text.split())
         if (n >= 3 and ratio > 0.5) or (0 <= r.conf < 35 and n >= 3):
-            r.issues.append(f"Bereich unlesbar (Lesesicherheit {max(0, r.conf):.0f} %) – nicht übersetzt.")
+            r.issues.append(f"Bereich unlesbar (Lesesicherheit {max(0, r.conf):.0f} %) – nicht übersetzt, "
+                            "Original bleibt sichtbar.")
             r.source_md = mark_illegible()
+            r.keep_original = True
         elif 0 <= r.conf < fusion.CONF_LOW or ratio > 0.2:
             r.issues.append(f"Geringe Lesesicherheit ({max(0, r.conf):.0f} %) – Text prüfen.")
 

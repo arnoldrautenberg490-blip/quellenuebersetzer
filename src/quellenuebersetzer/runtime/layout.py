@@ -242,15 +242,17 @@ def merge_lines(regions: list[Region], line_px: float | None = None) -> list[Reg
     out: list[Region] = []
     for r in sorted(regions, key=lambda r: (r.box[1], r.box[0])):
         merged = False
-        if r.kind == "absatz":
+        if r.kind in ("absatz", "randnotiz"):
             for o in out:
-                if o.kind != "absatz" or o.container != r.container or o.style != r.style:
+                if o.kind != r.kind or o.container != r.container or o.style != r.style:
                     continue
                 line_h = line_px or min(r.box[3] - r.box[1], o.box[3] - o.box[1])
                 gap = r.box[1] - o.box[3]
                 # gleiche Spalte = linker UND rechter Rand stimmen überein; breitere oder schmalere Elemente
-                # (spaltenübergreifende Kästen, Überschriften) werden nie mit einer Spalte vereinigt
-                same_column = abs(r.box[0] - o.box[0]) < line_h * 1.5 and abs(r.box[2] - o.box[2]) < line_h * 1.5
+                # (spaltenübergreifende Kästen, Überschriften) werden nie mit einer Spalte vereinigt.
+                # Randspalten sind flatternd gesetzt: dort genügt der gemeinsame linke Rand.
+                same_left = abs(r.box[0] - o.box[0]) < line_h * 1.5
+                same_column = same_left and (r.kind == "randnotiz" or abs(r.box[2] - o.box[2]) < line_h * 1.5)
                 if same_column and -line_h * 0.3 <= gap <= line_h * 0.6:
                     o.box = (min(o.box[0], r.box[0]), o.box[1], max(o.box[2], r.box[2]), max(o.box[3], r.box[3]))
                     o.order = min(o.order, r.order)

@@ -83,7 +83,8 @@ def flatten(gray: np.ndarray) -> np.ndarray:
     durch ihn ist der Grund überall gleich hell. So entstehen an Kanten hinterlegter Zeilen oder Spalten keine
     Punktreihen, die die Texterkennung stören.
     """
-    k = max(15, int(21 * gray.shape[1] / 2480)) | 1
+    # Fenster breiter als der dickste Schriftstrich (auch fette Titel), schmaler als hinterlegte Zeilen
+    k = max(31, int(61 * gray.shape[1] / 2480)) | 1
     background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
     return cv2.divide(gray, background, scale=255)
 

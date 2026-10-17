@@ -8,6 +8,10 @@ from pathlib import Path
 ROOT = Path(SPECPATH).parent
 SRC = ROOT / "src" / "quellenuebersetzer"
 
+# Baustempel: macht verschiedene Fassungen derselben Versionsnummer unterscheidbar („Über das Programm“)
+import datetime as _dt
+(SRC / "resources" / "baustempel.txt").write_text(_dt.datetime.now().strftime("Bau %d.%m.%Y %H:%M"), encoding="utf-8")
+
 block_cipher = None
 
 a = Analysis(

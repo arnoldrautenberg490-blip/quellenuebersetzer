@@ -152,6 +152,24 @@
       "sha256": "1da2384254fa8462c776faf3b43307fe19ce51be0931c623b2fdd560f96e299a",
       "size": 3421140,
       "license": "Apache-2.0"
+    },
+    "heb": {
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/heb.traineddata",
+      "sha256": "dbaa827aea6bc21215638447f17783a1004987c2d0bf5573d111fee397abdae5",
+      "size": 3704077,
+      "license": "Apache-2.0"
+    },
+    "yid": {
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/yid.traineddata",
+      "sha256": "086ec92aea9c7016c74b503c3d24906381e7e57cc3f487f12e1784eb2530ba94",
+      "size": 3278995,
+      "license": "Apache-2.0"
+    },
+    "rus": {
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/rus.traineddata",
+      "sha256": "b617eb6830ffabaaa795dd87ea7fd251adfe9cf0efe05eb9a2e8128b7728d6b6",
+      "size": 15301764,
+      "license": "Apache-2.0"
     }
   },
   "models": {
